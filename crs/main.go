@@ -388,6 +388,9 @@ func computeNavField() {
 		x := (float64(gx) + 0.5) * cell
 		y := (float64(gy) + 0.5) * cell
 		for gi := range gases {
+			if gases[gi].Thrown {
+				continue // seule la lacrymo CRS (jaune) est contournée
+			}
 			dx := x - gases[gi].X
 			dy := y - gases[gi].Y
 			rr := gases[gi].R + 40.0
@@ -849,6 +852,9 @@ func updateSimulation() {
 		var gasFx, gasFy float64
 		for gi := range gases {
 			g := &gases[gi]
+			if g.Thrown {
+				continue // la lacrymo renvoyée (bleue) n'affecte que les CRS
+			}
 			dx := p.X - g.X
 			dy := p.Y - g.Y
 			d := math.Hypot(dx, dy)
