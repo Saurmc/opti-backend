@@ -1,0 +1,13 @@
+# gstack session artifacts
+.gstack/
+
+# Go build output
+*.exe
+*.test
+*.out
+/crs/crs
+/crs/crs.exe
+
+# OS / editor
+.DS_Store
+Thumbs.db
