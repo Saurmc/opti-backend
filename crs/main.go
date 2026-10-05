@@ -20,8 +20,14 @@ const (
 	TotalProtesters int     = 6000
 	LeaderRatio     float64 = 0.10
 	TotalCops       int     = 160
-	ObstacleCount   int     = 10
 	TargetFPS       int     = 30
+
+	// Trame urbaine : grille d'immeubles réguliers séparés par des rues,
+	// avec une avenue centrale ouverte menant à l'objectif.
+	BlockSize     float64 = 520.0
+	StreetWidth   float64 = 160.0
+	AvenueCenterX float64 = 2500.0
+	AvenueHalfW   float64 = 300.0
 
 	// Géographie de la manif : objectif en haut, départ de la foule en bas, cordon CRS au milieu.
 	ObjectiveY float64 = 450.0  // un manifestant qui atteint Y <= ObjectiveY a "passé"
@@ -189,30 +195,66 @@ func capVec(x, y, max float64) (float64, float64) {
 	return x, y
 }
 
+// findFreeSpot cherche la case libre la plus proche (spawn/cordon dans la trame).
+func findFreeSpot(x, y float64) (float64, float64) {
+	if !collides(x, y) {
+		return x, y
+	}
+	for r := 20.0; r < 900.0; r += 20.0 {
+		for a := 0; a < 12; a++ {
+			ang := float64(a) / 12.0 * 2 * math.Pi
+			nx := x + math.Cos(ang)*r
+			ny := y + math.Sin(ang)*r
+			if !collides(nx, ny) {
+				return nx, ny
+			}
+		}
+	}
+	return x, y
+}
+
+// stepAround tente d'avancer dans la direction (dirx,diry) et, si un mur bloque,
+// essaie des angles de plus en plus ouverts pour contourner (wall-following naïf).
+func stepAround(x, y, dirx, diry, speed float64) (float64, float64, bool) {
+	d := math.Hypot(dirx, diry)
+	if d < 1e-9 {
+		return x, y, false
+	}
+	base := math.Atan2(diry, dirx)
+	for _, off := range []float64{0, 0.4, -0.4, 0.9, -0.9, 1.5, -1.5} {
+		a := base + off
+		nx := x + math.Cos(a)*speed
+		ny := y + math.Sin(a)*speed
+		if !collides(nx, ny) {
+			return nx, ny, true
+		}
+	}
+	return x, y, false
+}
+
 func initSimulation(seed int64) {
 	simRng = rand.New(rand.NewSource(seed))
 	passed = 0
 	arrested = 0
 	gases = nil
 
-	// Quelques immeubles (hors zone objectif et hors zone de départ) pour canaliser la foule.
+	// Trame de rues : immeubles réguliers séparés par des rues. L'objectif (haut)
+	// et l'avenue centrale restent dégagés. Les angles d'immeubles bordent les rues,
+	// ce qui rend les nasses de rue possibles.
 	obstacles = nil
-	for i := 0; i < ObstacleCount; i++ {
-		var ox, oy, w, h float64
-		for {
-			w = 150.0 + simRng.Float64()*350.0
-			h = 80.0 + simRng.Float64()*300.0
-			if simRng.Float64() > 0.5 {
-				w, h = h, w
-			}
-			ox = 300.0 + simRng.Float64()*(WorldSize-w-600.0)
-			oy = 900.0 + simRng.Float64()*(WorldSize-h-2000.0) // laisse l'objectif (haut) et le départ (bas) dégagés
-			if oy > SpawnMinY-200 {
+	period := BlockSize + StreetWidth
+	avMinX := AvenueCenterX - AvenueHalfW
+	avMaxX := AvenueCenterX + AvenueHalfW
+	for bx := StreetWidth; bx+BlockSize < WorldSize-StreetWidth; bx += period {
+		for by := StreetWidth; by+BlockSize < WorldSize-StreetWidth; by += period {
+			if by < ObjectiveY+StreetWidth { // dégager l'objectif en haut
 				continue
 			}
-			break
+			if bx+BlockSize > avMinX && bx < avMaxX { // ne pas obstruer l'avenue
+				continue
+			}
+			obstacles = append(obstacles, Obstacle{X: bx, Y: by, W: BlockSize, H: BlockSize})
 		}
-		obstacles = append(obstacles, Obstacle{X: ox, Y: oy, W: w, H: h})
 	}
 
 	// Manifestants : foule dense en bas.
@@ -248,6 +290,7 @@ func initSimulation(seed int64) {
 	for i := 0; i < TotalCops; i++ {
 		x := 400.0 + (WorldSize-800.0)*float64(i)/float64(TotalCops-1)
 		y := CordonY + (simRng.Float64()-0.5)*120.0
+		x, y = findFreeSpot(x, y)
 		cops[i] = Cop{
 			ID:        int64(i),
 			X:         x,
@@ -561,13 +604,9 @@ func updateSimulation() {
 		dx += (simRng.Float64() - 0.5) * 0.5
 		dy += (simRng.Float64() - 0.5) * 0.5
 
-		nx := c.X + dx
-		ny := c.Y + dy
-		if !collides(nx, c.Y) {
-			c.X = nx
-		}
-		if !collides(c.X, ny) {
-			c.Y = ny
+		// Contournement des immeubles (débloque les CRS coincés sur les angles).
+		if nx, ny, ok := stepAround(c.X, c.Y, dx, dy, c.Speed); ok {
+			c.X, c.Y = nx, ny
 		}
 	}
 
