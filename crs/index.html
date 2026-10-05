@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CRS Kettling • Simulateur de manif</title>
+    <style>
+      :root {
+        --bg: #070a13;
+        --panel: rgba(15, 23, 42, 0.9);
+        --border: #1e293b;
+        --text: #f1f5f9;
+        --muted: #64748b;
+        --cyan: #06b6d4;
+        --green: #10b981;
+        --red: #ef4444;
+        --amber: #f59e0b;
+        --orange: #fb923c;
+        --blue: #3b82f6;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        font-family: ui-monospace, monospace;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        display: flex;
+        height: 100vh;
+        overflow: hidden;
+      }
+      #sidebar {
+        width: 325px;
+        background: var(--panel);
+        border-right: 1px solid var(--border);
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        overflow-y: auto;
+        z-index: 10;
+      }
+      h1 {
+        font-size: 0.95rem;
+        color: var(--cyan);
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--red);
+        box-shadow: 0 0 8px var(--red);
+      }
+      .dot.on {
+        background: var(--green);
+        box-shadow: 0 0 8px var(--green);
+      }
+      .card {
+        background: #0b1120;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 12px;
+      }
+      .label {
+        font-size: 0.68rem;
+        color: var(--muted);
+        text-transform: uppercase;
+      }
+      .val {
+        font-size: 1.15rem;
+        font-weight: bold;
+        margin-top: 2px;
+        color: #fff;
+      }
+      .val span {
+        font-size: 0.72rem;
+        font-weight: normal;
+        color: var(--muted);
+      }
+      .legend-box {
+        background: #090e1a;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .legend-title {
+        font-size: 0.7rem;
+        color: var(--muted);
+        text-transform: uppercase;
+        margin-bottom: 2px;
+      }
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.73rem;
+        color: var(--text);
+      }
+      .legend-icon {
+        width: 12px;
+        height: 12px;
+        border-radius: 2px;
+        flex-shrink: 0;
+      }
+      .legend-circle {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      #viewport {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      canvas {
+        border: 2px solid #334155;
+        border-radius: 4px;
+        box-shadow: 0 0 35px rgba(0, 0, 0, 0.8);
+        background: #000;
+      }
+    </style>
+  </head>
+  <body>
+    <aside id="sidebar">
+      <h1><span id="dot" class="dot"></span> CRS Kettling Engine</h1>
+
+      <div class="card">
+        <div class="label">Seed Déterministe</div>
+        <div class="val" id="val-seed" style="color: #a78bfa">--</div>
+      </div>
+
+      <div class="card">
+        <div class="label">Fréquence Serveur (Tick) / Rendu</div>
+        <div class="val">
+          <span id="val-tps" style="color: var(--cyan); font-size: 1.25rem">--</span>
+          TPS / <span id="val-fps">0</span> FPS
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="label">Taux de Passage (objectif atteint)</div>
+        <div class="val" id="val-rate" style="color: var(--amber)">0.0%</div>
+      </div>
+
+      <div class="card">
+        <div class="label">Issue des Manifestants</div>
+        <div class="val" style="font-size: 0.95rem">
+          <span id="val-passed" style="color: var(--green); font-weight: bold">0</span>
+          passés /
+          <span id="val-arrested" style="color: var(--red); font-weight: bold">0</span>
+          arrêtés
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="label">En Lutte (sur la carte)</div>
+        <div class="val" style="font-size: 0.95rem">
+          <span id="val-leaders" style="color: var(--orange); font-weight: bold">0</span>
+          meneurs /
+          <span id="val-civils" style="color: var(--cyan); font-weight: bold">0</span>
+          civils
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="label">État de la Foule</div>
+        <div class="val" style="font-size: 0.95rem">
+          <span id="val-panicked" style="color: #fff; font-weight: bold">0</span>
+          <span>en panique</span> /
+          <span id="val-exhausted" style="color: var(--muted); font-weight: bold">0</span>
+          <span>à terre</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="label">Dispositif CRS</div>
+        <div class="val" style="font-size: 0.95rem">
+          <span id="val-cops" style="color: var(--blue); font-weight: bold">0</span>
+          agents /
+          <span id="val-gases" style="color: var(--amber); font-weight: bold">0</span>
+          lacrymos
+        </div>
+      </div>
+
+      <div class="legend-box">
+        <div class="legend-title">Légende Tactique</div>
+        <div class="legend-item">
+          <div class="legend-circle" style="background: #fb923c"></div>
+          Meneur (connaît l'objectif)
+        </div>
+        <div class="legend-item">
+          <div class="legend-circle" style="background: #06b6d4"></div>
+          Civil (suiveur)
+        </div>
+        <div class="legend-item">
+          <div class="legend-circle" style="background: #fff; box-shadow: 0 0 6px #fff"></div>
+          En panique (fuite)
+        </div>
+        <div class="legend-item">
+          <div class="legend-icon" style="background: var(--blue)"></div>
+          CRS
+        </div>
+        <div class="legend-item">
+          <div class="legend-circle" style="background: rgba(245, 221, 66, 0.4); border: 1px solid #f5dd42"></div>
+          Nuage lacrymogène
+        </div>
+        <div class="legend-item">
+          <div class="legend-icon" style="background: linear-gradient(45deg, #1e3a8a, #ef4444)"></div>
+          Heatmap (densité foule)
+        </div>
+        <div class="legend-item">
+          <div class="legend-icon" style="background: rgba(16, 185, 129, 0.3); border: 1px solid #10b981"></div>
+          Zone objectif
+        </div>
+        <div class="legend-item">
+          <div class="legend-icon" style="background: #1e293b; border: 1px solid #334155"></div>
+          Bâtiments
+        </div>
+      </div>
+    </aside>
+
+    <main id="viewport">
+      <canvas id="canvas" width="800" height="800"></canvas>
+    </main>
+
+    <script>
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      const dot = document.getElementById("dot");
+
+      const el = (id) => document.getElementById(id);
+      const elSeed = el("val-seed"),
+        elTps = el("val-tps"),
+        elFps = el("val-fps"),
+        elRate = el("val-rate"),
+        elPassed = el("val-passed"),
+        elArrested = el("val-arrested"),
+        elLeaders = el("val-leaders"),
+        elCivils = el("val-civils"),
+        elPanicked = el("val-panicked"),
+        elExhausted = el("val-exhausted"),
+        elCops = el("val-cops"),
+        elGases = el("val-gases");
+
+      let heatmap = [],
+        protesters = [],
+        cops = [],
+        gases = [],
+        obstacles = [],
+        objective = null;
+      let gridCols = 100,
+        gridRows = 100,
+        worldSize = 5000;
+
+      // Palette densité foule : bleu nuit -> rouge.
+      const palette = [];
+      for (let i = 0; i <= 255; i++) {
+        const r = Math.min(255, Math.floor(i * 1.6));
+        const g = Math.floor(i * 0.35);
+        const b = Math.max(40, 160 - Math.floor(i * 0.5));
+        palette.push(`rgb(${r},${g},${b})`);
+      }
+
+      const ws = new WebSocket("ws://" + window.location.host + "/ws");
+      ws.onopen = () => dot.classList.add("on");
+      ws.onclose = () => dot.classList.remove("on");
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          heatmap = data.heatmap || [];
+          protesters = data.protesters || [];
+          cops = data.cops || [];
+          gases = data.gases || [];
+          obstacles = data.obstacles || [];
+          objective = data.objective || null;
+          gridCols = data.grid_cols;
+          gridRows = data.grid_rows;
+          worldSize = data.world_size;
+
+          const s = data.stats;
+          elSeed.textContent = s.seed;
+          elTps.textContent = data.tps;
+          elRate.textContent = `${s.pass_rate}%`;
+          elPassed.textContent = s.passed;
+          elArrested.textContent = s.arrested;
+          elLeaders.textContent = s.leaders;
+          elCivils.textContent = s.civils;
+          elPanicked.textContent = s.panicked;
+          elExhausted.textContent = s.exhausted;
+          elCops.textContent = s.cops;
+          elGases.textContent = s.gases;
+        } catch (e) {
+          console.error(e);
+        }
+      };
+
+      let frames = 0,
+        lastCheck = performance.now();
+
+      function render() {
+        ctx.fillStyle = "#05070e";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        const scale = canvas.width / worldSize;
+        const cellW = canvas.width / gridCols;
+        const cellH = canvas.height / gridRows;
+
+        // 1. Zone objectif
+        if (objective) {
+          ctx.fillStyle = "rgba(16, 185, 129, 0.18)";
+          ctx.fillRect(
+            objective.x * scale,
+            objective.y * scale,
+            objective.w * scale,
+            objective.h * scale,
+          );
+          ctx.strokeStyle = "rgba(16, 185, 129, 0.6)";
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(
+            objective.x * scale,
+            objective.y * scale,
+            objective.w * scale,
+            objective.h * scale,
+          );
+        }
+
+        // 2. Heatmap densité foule
+        for (let y = 0; y < gridRows; y++) {
+          for (let x = 0; x < gridCols; x++) {
+            const count = heatmap[y * gridCols + x] || 0;
+            if (count > 0) {
+              const intensity = Math.min(255, count * 22);
+              ctx.fillStyle = palette[intensity];
+              ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
+            }
+          }
+        }
+
+        // 3. Bâtiments
+        ctx.fillStyle = "#1e293b";
+        ctx.strokeStyle = "#334155";
+        ctx.lineWidth = 1;
+        for (const obs of obstacles) {
+          ctx.fillRect(obs.x * scale, obs.y * scale, obs.w * scale, obs.h * scale);
+          ctx.strokeRect(obs.x * scale, obs.y * scale, obs.w * scale, obs.h * scale);
+        }
+
+        // 4. Nuages lacrymogènes
+        for (const g of gases) {
+          const cx = g.x * scale,
+            cy = g.y * scale,
+            cr = g.r * scale;
+          const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
+          grad.addColorStop(0, "rgba(245, 221, 66, 0.35)");
+          grad.addColorStop(1, "rgba(245, 221, 66, 0)");
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(cx, cy, cr, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+
+        // 5. Manifestants
+        for (const p of protesters) {
+          const px = p.x * scale,
+            py = p.y * scale;
+          if (p.l) {
+            ctx.fillStyle = p.p ? "#ffffff" : "#fb923c";
+            ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
+          } else {
+            ctx.fillStyle = p.p ? "#ffffff" : "rgba(6, 182, 212, 0.55)";
+            ctx.fillRect(px - 1, py - 1, 2, 2);
+          }
+          if (p.e) {
+            ctx.strokeStyle = "#64748b";
+            ctx.lineWidth = 0.5;
+            ctx.strokeRect(px - 2, py - 2, 4, 4);
+          }
+        }
+
+        // 6. CRS (par-dessus, bien visibles)
+        for (const c of cops) {
+          const px = c.x * scale,
+            py = c.y * scale;
+          ctx.fillStyle = "#3b82f6";
+          ctx.fillRect(px - 2, py - 2, 4, 4);
+          ctx.strokeStyle = "#0b1120";
+          ctx.lineWidth = 0.5;
+          ctx.strokeRect(px - 2, py - 2, 4, 4);
+        }
+
+        frames++;
+        const now = performance.now();
+        if (now - lastCheck >= 1000) {
+          elFps.textContent = frames;
+          frames = 0;
+          lastCheck = now;
+        }
+        requestAnimationFrame(render);
+      }
+      requestAnimationFrame(render);
+    </script>
+  </body>
+</html>
