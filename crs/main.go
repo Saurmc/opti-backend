@@ -29,6 +29,10 @@ const (
 	AvenueCenterX float64 = 2500.0
 	AvenueHalfW   float64 = 300.0
 
+	// Nasse de rue : un segment tenu aux deux bouts par des CRS piège la foule.
+	KettleSealRadius   float64 = 170.0
+	KettleArrestChance float64 = 0.03
+
 	// Géographie de la manif : objectif en haut, départ de la foule en bas, cordon CRS au milieu.
 	ObjectiveY float64 = 450.0  // un manifestant qui atteint Y <= ObjectiveY a "passé"
 	SpawnMinY  float64 = 3300.0 // bande de départ de la foule
@@ -109,6 +113,13 @@ type Gas struct {
 	Age  int
 }
 
+// Segment : un corridor de rue et ses deux intersections (bouts).
+type Segment struct {
+	X0, Y0, X1, Y1 float64 // boîte du corridor
+	AX, AY         float64 // intersection A
+	BX, BY         float64 // intersection B
+}
+
 // Points sérialisés vers le front (clés courtes : grosse foule).
 type PPoint struct {
 	X int16 `json:"x"`
@@ -159,6 +170,7 @@ type FramePayload struct {
 	Stats      Stats      `json:"stats"`
 	Obstacles  []Obstacle `json:"obstacles"`
 	Objective  Rect       `json:"objective"`
+	Kettles    []Rect     `json:"kettles"`
 	Gases      []GPoint   `json:"gases"`
 	Protesters []PPoint   `json:"protesters"`
 	Cops       []CPoint   `json:"cops"`
@@ -169,10 +181,12 @@ var (
 	simRng     *rand.Rand
 	protesters []Protester
 	cops       []Cop
-	obstacles  []Obstacle
-	gases      []Gas
-	passed     int
-	arrested   int
+	obstacles   []Obstacle
+	gases       []Gas
+	segments    []Segment
+	sealedRects []Rect
+	passed      int
+	arrested    int
 )
 
 func collides(x, y float64) bool {
@@ -297,6 +311,53 @@ func initSimulation(seed int64) {
 			Y:         y,
 			Speed:     2.5 + simRng.Float64()*0.4,
 			WanderAng: simRng.Float64() * 2 * math.Pi,
+		}
+	}
+
+	// Pré-calcul des segments de rue (corridors + intersections) pour la nasse.
+	segments = nil
+	sealedRects = nil
+	K := int(WorldSize / period)
+	vsX := func(k int) float64 { return float64(k)*period + StreetWidth/2 }
+	hsY := func(h int) float64 { return float64(h)*period + StreetWidth/2 }
+	for k := 0; k <= K; k++ {
+		x := vsX(k)
+		if x > WorldSize {
+			break
+		}
+		for h := 0; h < K; h++ {
+			ay, by := hsY(h), hsY(h+1)
+			if by > WorldSize {
+				break
+			}
+			if by < ObjectiveY {
+				continue
+			}
+			segments = append(segments, Segment{
+				X0: x - StreetWidth/2, Y0: ay,
+				X1: x + StreetWidth/2, Y1: by,
+				AX: x, AY: ay, BX: x, BY: by,
+			})
+		}
+	}
+	for h := 0; h <= K; h++ {
+		y := hsY(h)
+		if y > WorldSize {
+			break
+		}
+		if y < ObjectiveY {
+			continue
+		}
+		for k := 0; k < K; k++ {
+			ax, bx := vsX(k), vsX(k+1)
+			if bx > WorldSize {
+				break
+			}
+			segments = append(segments, Segment{
+				X0: ax, Y0: y - StreetWidth/2,
+				X1: bx, Y1: y + StreetWidth/2,
+				AX: ax, AY: y, BX: bx, BY: y,
+			})
 		}
 	}
 }
@@ -610,6 +671,48 @@ func updateSimulation() {
 		}
 	}
 
+	// 2b. Nasse de rue : un segment tenu aux deux bouts par des CRS piège la foule.
+	sealedRects = sealedRects[:0]
+	r2 := KettleSealRadius * KettleSealRadius
+	for si := range segments {
+		seg := &segments[si]
+		copA, copB := false, false
+		for ci := range cops {
+			c := &cops[ci]
+			if !copA {
+				dx, dy := c.X-seg.AX, c.Y-seg.AY
+				if dx*dx+dy*dy <= r2 {
+					copA = true
+				}
+			}
+			if !copB {
+				dx, dy := c.X-seg.BX, c.Y-seg.BY
+				if dx*dx+dy*dy <= r2 {
+					copB = true
+				}
+			}
+			if copA && copB {
+				break
+			}
+		}
+		if !(copA && copB) {
+			continue
+		}
+		sealedRects = append(sealedRects, Rect{X: seg.X0, Y: seg.Y0, W: seg.X1 - seg.X0, H: seg.Y1 - seg.Y0})
+		for pi := range protesters {
+			p := &protesters[pi]
+			if p.Arrested || p.Passed {
+				continue
+			}
+			if p.X >= seg.X0 && p.X <= seg.X1 && p.Y >= seg.Y0 && p.Y <= seg.Y1 {
+				if simRng.Float64() < KettleArrestChance {
+					p.Arrested = true
+					arrested++
+				}
+			}
+		}
+	}
+
 	// 3. Vieillissement des nuages de gaz.
 	if len(gases) > 0 {
 		kept := gases[:0]
@@ -746,6 +849,7 @@ func wsHandler(ws *websocket.Conn) {
 			},
 			Obstacles:  obstacles,
 			Objective:  Rect{X: 0, Y: 0, W: WorldSize, H: ObjectiveY},
+			Kettles:    sealedRects,
 			Gases:      gPoints,
 			Protesters: pPoints,
 			Cops:       cPoints,

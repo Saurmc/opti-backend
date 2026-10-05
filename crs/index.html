@@ -216,6 +216,10 @@
           Nuage lacrymogène
         </div>
         <div class="legend-item">
+          <div class="legend-icon" style="background: rgba(239, 68, 68, 0.22); border: 1px solid #ef4444"></div>
+          Corridor scellé (nasse)
+        </div>
+        <div class="legend-item">
           <div class="legend-icon" style="background: linear-gradient(45deg, #1e3a8a, #ef4444)"></div>
           Heatmap (densité foule)
         </div>
@@ -257,6 +261,7 @@
         protesters = [],
         cops = [],
         gases = [],
+        kettles = [],
         obstacles = [],
         objective = null;
       let gridCols = 100,
@@ -283,6 +288,7 @@
           protesters = data.protesters || [];
           cops = data.cops || [];
           gases = data.gases || [];
+          kettles = data.kettles || [];
           obstacles = data.obstacles || [];
           objective = data.objective || null;
           gridCols = data.grid_cols;
@@ -346,6 +352,15 @@
               ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
             }
           }
+        }
+
+        // 2b. Nasses (corridors scellés)
+        for (const kt of kettles) {
+          ctx.fillStyle = "rgba(239, 68, 68, 0.22)";
+          ctx.fillRect(kt.x * scale, kt.y * scale, kt.w * scale, kt.h * scale);
+          ctx.strokeStyle = "rgba(239, 68, 68, 0.75)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(kt.x * scale, kt.y * scale, kt.w * scale, kt.h * scale);
         }
 
         // 3. Bâtiments
