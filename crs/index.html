@@ -206,8 +206,26 @@
         <label>Létalité LBD (%) <span id="lbl-kill">5</span>
           <input type="range" id="sl-kill" min="0" max="50" step="1" value="5" />
         </label>
-        <label>Renvoi lacrymo (%) <span id="lbl-counter">10</span>
-          <input type="range" id="sl-counter" min="0" max="100" step="5" value="10" />
+        <label>Renvoi lacrymo (%) <span id="lbl-counter">20</span>
+          <input type="range" id="sl-counter" min="0" max="100" step="5" value="20" />
+        </label>
+        <label>Tirs LBD /s (par CRS) <span id="lbl-lbdrate">0.2</span>
+          <input type="range" id="sl-lbdrate" min="0" max="3" step="0.1" value="0.2" />
+        </label>
+        <label>Lacrymos /s (par CRS) <span id="lbl-gasrate">0.2</span>
+          <input type="range" id="sl-gasrate" min="0" max="3" step="0.1" value="0.2" />
+        </label>
+        <label>Fils /s (par meneur) <span id="lbl-twrate">0.12</span>
+          <input type="range" id="sl-twrate" min="0" max="2" step="0.02" value="0.12" />
+        </label>
+        <label>Lanceurs de pavés (%) <span id="lbl-pavratio">35</span>
+          <input type="range" id="sl-pavratio" min="0" max="100" step="5" value="35" />
+        </label>
+        <label>Pavés /s (par lanceur) <span id="lbl-pavrate">0.6</span>
+          <input type="range" id="sl-pavrate" min="0" max="3" step="0.1" value="0.6" />
+        </label>
+        <label>Précision pavé (%) <span id="lbl-pavhit">50</span>
+          <input type="range" id="sl-pavhit" min="0" max="100" step="5" value="50" />
         </label>
         <label>Seed
           <input type="number" id="in-seed" value="42" />
@@ -293,8 +311,13 @@
       </div>
 
       <div class="card">
-        <div class="label">Victimes (tir LBD)</div>
-        <div class="val" id="val-killed" style="color: var(--red)">0</div>
+        <div class="label">Victimes LBD / Pavés lancés</div>
+        <div class="val" style="font-size: 0.95rem">
+          <span id="val-killed" style="color: var(--red); font-weight: bold">0</span>
+          victimes /
+          <span id="val-paves" style="color: #a3e635; font-weight: bold">0</span>
+          pavés
+        </div>
       </div>
 
       <div class="legend-box">
@@ -334,6 +357,10 @@
         <div class="legend-item">
           <div class="legend-circle" style="background: rgba(245, 221, 66, 0.4); border: 1px solid #f5dd42"></div>
           Nuage lacrymogène
+        </div>
+        <div class="legend-item">
+          <div class="legend-circle" style="background: rgba(56, 189, 248, 0.4); border: 1px solid #38bdf8"></div>
+          Lacrymo renvoyée (CRS reculent)
         </div>
         <div class="legend-item">
           <div class="legend-icon" style="background: rgba(239, 68, 68, 0.22); border: 1px solid #ef4444"></div>
@@ -434,7 +461,8 @@
         elUmbrellas = el("val-umbrellas"),
         elTripwires = el("val-tripwires"),
         elCopsDown = el("val-copsdown"),
-        elKilled = el("val-killed");
+        elKilled = el("val-killed"),
+        elPaves = el("val-paves");
 
       let heatmap = [],
         protesters = [],
@@ -472,13 +500,25 @@
         slLbd = el("sl-lbd"),
         slKill = el("sl-kill"),
         slCounter = el("sl-counter"),
+        slLbdRate = el("sl-lbdrate"),
+        slGasRate = el("sl-gasrate"),
+        slTwRate = el("sl-twrate"),
+        slPavRatio = el("sl-pavratio"),
+        slPavRate = el("sl-pavrate"),
+        slPavHit = el("sl-pavhit"),
         inSeed = el("in-seed");
       const lblProt = el("lbl-prot"),
         lblCops = el("lbl-cops"),
         lblAggr = el("lbl-aggr"),
         lblLbd = el("lbl-lbd"),
         lblKill = el("lbl-kill"),
-        lblCounter = el("lbl-counter");
+        lblCounter = el("lbl-counter"),
+        lblLbdRate = el("lbl-lbdrate"),
+        lblGasRate = el("lbl-gasrate"),
+        lblTwRate = el("lbl-twrate"),
+        lblPavRatio = el("lbl-pavratio"),
+        lblPavRate = el("lbl-pavrate"),
+        lblPavHit = el("lbl-pavhit");
       const btnPlay = el("btn-play"),
         btnRestart = el("btn-restart"),
         btnStop = el("btn-stop");
@@ -493,6 +533,12 @@
       slLbd.oninput = () => (lblLbd.textContent = slLbd.value);
       slKill.oninput = () => (lblKill.textContent = slKill.value);
       slCounter.oninput = () => (lblCounter.textContent = slCounter.value);
+      slLbdRate.oninput = () => (lblLbdRate.textContent = slLbdRate.value);
+      slGasRate.oninput = () => (lblGasRate.textContent = slGasRate.value);
+      slTwRate.oninput = () => (lblTwRate.textContent = slTwRate.value);
+      slPavRatio.oninput = () => (lblPavRatio.textContent = slPavRatio.value);
+      slPavRate.oninput = () => (lblPavRate.textContent = slPavRate.value);
+      slPavHit.oninput = () => (lblPavHit.textContent = slPavHit.value);
 
       btnPlay.onclick = () =>
         send({ cmd: srvPaused || srvStopped ? "play" : "pause" });
@@ -507,6 +553,12 @@
           lbd_ratio: parseInt(slLbd.value, 10) / 100,
           lbd_kill: parseInt(slKill.value, 10) / 100,
           counter_chance: parseInt(slCounter.value, 10) / 100,
+          lbd_rate: parseFloat(slLbdRate.value),
+          gas_rate: parseFloat(slGasRate.value),
+          tripwire_rate: parseFloat(slTwRate.value),
+          pave_ratio: parseInt(slPavRatio.value, 10) / 100,
+          pave_rate: parseFloat(slPavRate.value),
+          pave_hit: parseInt(slPavHit.value, 10) / 100,
         });
 
       ws.onmessage = (event) => {
@@ -540,6 +592,18 @@
               lblKill.textContent = slKill.value;
               slCounter.value = Math.round(c.counter_chance * 100);
               lblCounter.textContent = slCounter.value;
+              slLbdRate.value = c.lbd_rate;
+              lblLbdRate.textContent = c.lbd_rate.toFixed(2);
+              slGasRate.value = c.gas_rate;
+              lblGasRate.textContent = c.gas_rate.toFixed(2);
+              slTwRate.value = c.tripwire_rate;
+              lblTwRate.textContent = c.tripwire_rate.toFixed(2);
+              slPavRatio.value = Math.round(c.pave_ratio * 100);
+              lblPavRatio.textContent = slPavRatio.value;
+              slPavRate.value = c.pave_rate;
+              lblPavRate.textContent = c.pave_rate.toFixed(2);
+              slPavHit.value = Math.round(c.pave_hit * 100);
+              lblPavHit.textContent = slPavHit.value;
               inSeed.value = c.seed;
               cfgSynced = true;
             }
@@ -566,6 +630,7 @@
           elTripwires.textContent = s.tripwires;
           elCopsDown.textContent = s.cops_down;
           elKilled.textContent = s.killed;
+          elPaves.textContent = s.paves;
         } catch (e) {
           console.error(e);
         }
@@ -645,14 +710,19 @@
           ctx.stroke();
         }
 
-        // 4. Nuages lacrymogènes
+        // 4. Nuages lacrymogènes (jaune = CRS, bleu = renvoyé par les manifestants)
         for (const g of gases) {
           const cx = g.x * scale,
             cy = g.y * scale,
             cr = g.r * scale;
           const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
-          grad.addColorStop(0, "rgba(245, 221, 66, 0.35)");
-          grad.addColorStop(1, "rgba(245, 221, 66, 0)");
+          if (g.b) {
+            grad.addColorStop(0, "rgba(56, 189, 248, 0.40)");
+            grad.addColorStop(1, "rgba(56, 189, 248, 0)");
+          } else {
+            grad.addColorStop(0, "rgba(245, 221, 66, 0.35)");
+            grad.addColorStop(1, "rgba(245, 221, 66, 0)");
+          }
           ctx.fillStyle = grad;
           ctx.beginPath();
           ctx.arc(cx, cy, cr, 0, 2 * Math.PI);

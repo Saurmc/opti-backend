@@ -38,7 +38,7 @@ const (
 	// Équipement manifestants.
 	GogglesRatio         float64 = 0.25 // lunettes : immunité lacrymo
 	UmbrellaRatio        float64 = 0.20 // parapluie : anti canon à eau + LBD (Phase 4)
-	CounterGasChance     float64 = 0.10 // chance de renvoyer une lacrymo vers les CRS
+	CounterGasChance     float64 = 0.20 // chance de renvoyer une lacrymo vers les CRS
 	CounterGasCd         int16   = 120
 	TripwireDeployChance float64 = 0.004 // par meneur/tick quand des CRS sont proches
 	TripwireRange        float64 = 420.0 // distance CRS déclenchant la pose
@@ -70,6 +70,12 @@ const (
 	LBDPush            float64 = 48.0
 	LBDKillChance      float64 = 0.05
 	UmbrellaKillFactor float64 = 0.2 // le parapluie réduit la létalité
+
+	// Pavés (arme des manifestants).
+	PaveRange   float64 = 330.0
+	PavePush    float64 = 36.0 // recul infligé au CRS touché
+	PaveStagger int16   = 45   // CRS étourdi (ralenti)
+	PaveKnock   float64 = 0.18 // chance de faire tomber le CRS
 
 	// Géographie de la manif : objectif en haut, départ de la foule en bas, cordon CRS au milieu.
 	ObjectiveY float64 = 450.0  // un manifestant qui atteint Y <= ObjectiveY a "passé"
@@ -129,9 +135,11 @@ type Protester struct {
 	InGas         bool
 	Goggles       bool // immunité lacrymo
 	Umbrella      bool // anti canon à eau + LBD
+	IsThrower     bool // lanceur de pavés
 	Stamina       int16
 	PanicTimer    int16
 	CounterCd     int16 // cooldown contre-lacrymo
+	PaveCd        int16 // cooldown lancer de pavé
 	WetTimer      int16 // aspergé par le canon à eau (ralenti)
 	X, Y          float64
 	Speed         float64
@@ -165,10 +173,11 @@ type Tripwire struct {
 }
 
 type Gas struct {
-	X, Y float64
-	R    float64
-	MaxR float64
-	Age  int
+	X, Y   float64
+	R      float64
+	MaxR   float64
+	Age    int
+	Thrown bool // lacrymo renvoyée par les manifestants (bleue, fait reculer les CRS)
 }
 
 // Segment : un corridor de rue et ses deux intersections (bouts).
@@ -198,6 +207,7 @@ type GPoint struct {
 	X int16 `json:"x"`
 	Y int16 `json:"y"`
 	R int16 `json:"r"`
+	B bool  `json:"b"` // renvoyée (bleue)
 }
 
 type CannonPoint struct {
@@ -220,6 +230,7 @@ type Stats struct {
 	Passed     int     `json:"passed"`
 	Arrested   int     `json:"arrested"`
 	Killed     int     `json:"killed"`
+	Paves      int     `json:"paves"`
 	Panicked   int     `json:"panicked"`
 	Exhausted  int     `json:"exhausted"`
 	Leaders    int     `json:"leaders"`
@@ -240,7 +251,13 @@ type ConfigEcho struct {
 	Aggr          float64 `json:"aggr"`
 	LBDRatio      float64 `json:"lbd_ratio"`
 	LBDKill       float64 `json:"lbd_kill"`
+	LBDRate       float64 `json:"lbd_rate"`
+	GasRate       float64 `json:"gas_rate"`
 	CounterChance float64 `json:"counter_chance"`
+	PaveRatio     float64 `json:"pave_ratio"`
+	PaveRate      float64 `json:"pave_rate"`
+	PaveHit       float64 `json:"pave_hit"`
+	TripwireRate  float64 `json:"tripwire_rate"`
 	Paused        bool    `json:"paused"`
 	Stopped       bool    `json:"stopped"`
 }
@@ -276,6 +293,7 @@ var (
 	passed       int
 	arrested     int
 	killed       int
+	pavesThrown  int
 
 	// Navigation.
 	navBlocked []bool
@@ -478,7 +496,13 @@ type SimConfig struct {
 	Aggr          float64 // agressivité CRS (0.5..3.0)
 	LBDRatio      float64 // fraction de CRS équipés d'un LBD
 	LBDKill       float64 // probabilité de tuer au LBD
+	LBDRate       float64 // tirs LBD/s par CRS équipé
+	GasRate       float64 // lacrymos/s par CRS
 	CounterChance float64 // probabilité de renvoi de lacrymo
+	PaveRatio     float64 // fraction de manifestants lanceurs de pavés
+	PaveRate      float64 // pavés/s par lanceur
+	PaveHit       float64 // probabilité de toucher un CRS
+	TripwireRate  float64 // fils/s par meneur
 }
 
 func defaultConfig() SimConfig {
@@ -489,8 +513,29 @@ func defaultConfig() SimConfig {
 		Aggr:          1.0,
 		LBDRatio:      LBDCopRatio,
 		LBDKill:       LBDKillChance,
+		LBDRate:       float64(TargetFPS) / float64(LBDCooldown),
+		GasRate:       float64(TargetFPS) / float64(GasCooldownTicks),
 		CounterChance: CounterGasChance,
+		PaveRatio:     0.35,
+		PaveRate:      0.6,
+		PaveHit:       0.5,
+		TripwireRate:  TripwireDeployChance * float64(TargetFPS),
 	}
+}
+
+// rateToCd convertit un taux (par seconde) en cooldown (ticks). 0 => jamais.
+func rateToCd(ratePerSec float64) int16 {
+	if ratePerSec <= 0 {
+		return 32000
+	}
+	cd := float64(TargetFPS) / ratePerSec
+	if cd < 1 {
+		cd = 1
+	}
+	if cd > 32000 {
+		cd = 32000
+	}
+	return int16(cd)
 }
 
 func collides(x, y float64) bool {
@@ -563,6 +608,12 @@ func initSimulation(c SimConfig) {
 	c.LBDRatio = math.Max(0, math.Min(1, c.LBDRatio))
 	c.LBDKill = math.Max(0, math.Min(1, c.LBDKill))
 	c.CounterChance = math.Max(0, math.Min(1, c.CounterChance))
+	c.PaveRatio = math.Max(0, math.Min(1, c.PaveRatio))
+	c.PaveHit = math.Max(0, math.Min(1, c.PaveHit))
+	c.LBDRate = math.Max(0, c.LBDRate)
+	c.GasRate = math.Max(0, c.GasRate)
+	c.PaveRate = math.Max(0, c.PaveRate)
+	c.TripwireRate = math.Max(0, c.TripwireRate)
 	cfg = c
 	paused = false
 	stopped = false
@@ -570,6 +621,7 @@ func initSimulation(c SimConfig) {
 	passed = 0
 	arrested = 0
 	killed = 0
+	pavesThrown = 0
 	gases = nil
 	tripwires = nil
 	waterCannons = nil
@@ -614,6 +666,7 @@ func initSimulation(c SimConfig) {
 			IsLeader:      leader,
 			Goggles:       simRng.Float64() < GogglesRatio,
 			Umbrella:      simRng.Float64() < UmbrellaRatio,
+			IsThrower:     simRng.Float64() < c.PaveRatio,
 			Stamina:       MaxStamina - int16(simRng.Intn(20)),
 			X:             x,
 			Y:             y,
@@ -759,6 +812,9 @@ func updateSimulation() {
 		if p.CounterCd > 0 {
 			p.CounterCd--
 		}
+		if p.PaveCd > 0 {
+			p.PaveCd--
+		}
 		if p.WetTimer > 0 {
 			p.WetTimer--
 		}
@@ -794,6 +850,7 @@ func updateSimulation() {
 		var copFx, copFy float64
 		nearestCopD := math.MaxFloat64
 		var nearestCopX, nearestCopY float64
+		nearestCopIdx := -1
 		encircle := 0
 		for ci := range cops {
 			c := &cops[ci]
@@ -803,6 +860,7 @@ func updateSimulation() {
 			if d < nearestCopD {
 				nearestCopD = d
 				nearestCopX, nearestCopY = c.X, c.Y
+				nearestCopIdx = ci
 			}
 			if d < EncircleRadius {
 				encircle++
@@ -834,18 +892,47 @@ func updateSimulation() {
 				dl = 1
 			}
 			gases = append(gases, Gas{
-				X:    nearestCopX - dx/dl*60.0,
-				Y:    nearestCopY - dy/dl*60.0,
-				R:    30.0,
-				MaxR: GasMaxRadius * 0.7,
+				X:      nearestCopX - dx/dl*60.0,
+				Y:      nearestCopY - dy/dl*60.0,
+				R:      30.0,
+				MaxR:   GasMaxRadius * 0.7,
+				Thrown: true,
 			})
 			p.CounterCd = CounterGasCd
 		}
 
 		// Fil tendu : un meneur en pose un quand des CRS approchent.
 		if p.IsLeader && nearestCopD < TripwireRange && len(tripwires) < TripwireMaxActive &&
-			simRng.Float64() < TripwireDeployChance {
+			simRng.Float64() < cfg.TripwireRate/float64(TargetFPS) {
 			tripwires = append(tripwires, Tripwire{X: p.X, Y: p.Y, Uses: TripwireUses})
+		}
+
+		// Pavé : un lanceur vise le CRS le plus proche (recul + étourdissement).
+		if p.IsThrower && cfg.PaveRate > 0 && p.PaveCd == 0 && !p.IsExhausted &&
+			nearestCopIdx >= 0 && nearestCopD < PaveRange {
+			p.PaveCd = rateToCd(cfg.PaveRate)
+			pavesThrown++
+			if simRng.Float64() < cfg.PaveHit {
+				c := &cops[nearestCopIdx]
+				dx := c.X - p.X
+				dy := c.Y - p.Y
+				d := math.Hypot(dx, dy)
+				if d < 1e-6 {
+					d = 1
+				}
+				if !collides(c.X+dx/d*PavePush, c.Y) {
+					c.X += dx / d * PavePush
+				}
+				if !collides(c.X, c.Y+dy/d*PavePush) {
+					c.Y += dy / d * PavePush
+				}
+				if c.SlowTimer < PaveStagger {
+					c.SlowTimer = PaveStagger
+				}
+				if simRng.Float64() < PaveKnock {
+					c.FallTimer = CopFallTicks / 2
+				}
+			}
 		}
 
 		// Épuisé : immobilisé le temps de récupérer (reste interpellable).
@@ -1025,7 +1112,7 @@ func updateSimulation() {
 		}
 
 		// Lacrymo : densité trop forte devant => tir vers la foule.
-		if c.GasCd == 0 && senseCount >= gasThresh && len(gases) < MaxGases {
+		if c.GasCd == 0 && cfg.GasRate > 0 && senseCount >= gasThresh && len(gases) < MaxGases {
 			var dirx, diry float64
 			if targetFront != nil {
 				dirx, diry = targetFront.X-c.X, targetFront.Y-c.Y
@@ -1042,7 +1129,7 @@ func updateSimulation() {
 				R:    30.0,
 				MaxR: GasMaxRadius,
 			})
-			c.GasCd = GasCooldownTicks
+			c.GasCd = rateToCd(cfg.GasRate)
 		}
 
 		// Grenade de désencerclement : CRS submergé => repousse tout autour.
@@ -1076,7 +1163,7 @@ func updateSimulation() {
 			if c.LBDCd > 0 {
 				c.LBDCd--
 			}
-			if c.LBDCd == 0 && targetFront != nil && frontD2 < LBDRange*LBDRange {
+			if c.LBDCd == 0 && cfg.LBDRate > 0 && targetFront != nil && frontD2 < LBDRange*LBDRange {
 				impactX, impactY := targetFront.X, targetFront.Y
 				kc := cfg.LBDKill
 				if targetFront.Umbrella {
@@ -1110,7 +1197,7 @@ func updateSimulation() {
 						p.PanicTimer = PanicDuration
 					}
 				}
-				c.LBDCd = LBDCooldown
+				c.LBDCd = rateToCd(cfg.LBDRate)
 			}
 		}
 
@@ -1142,6 +1229,21 @@ func updateSimulation() {
 		}
 		dx += (simRng.Float64() - 0.5) * 0.5
 		dy += (simRng.Float64() - 0.5) * 0.5
+
+		// Lacrymo renvoyée (bleue) : repousse les CRS, les force à reculer.
+		for gi := range gases {
+			g := &gases[gi]
+			if !g.Thrown {
+				continue
+			}
+			gdx := c.X - g.X
+			gdy := c.Y - g.Y
+			gd := math.Hypot(gdx, gdy)
+			if gd < g.R+60.0 && gd > 1e-6 {
+				dx += gdx / gd * copSpeed * 2.5
+				dy += gdy / gd * copSpeed * 2.5
+			}
+		}
 
 		// Contournement des immeubles (débloque les CRS coincés sur les angles).
 		if nx, ny, ok := stepAround(c.X, c.Y, dx, dy, copSpeed); ok {
@@ -1314,7 +1416,13 @@ type controlMsg struct {
 	Aggr          float64 `json:"aggr"`
 	LBDRatio      float64 `json:"lbd_ratio"`
 	LBDKill       float64 `json:"lbd_kill"`
+	LBDRate       float64 `json:"lbd_rate"`
+	GasRate       float64 `json:"gas_rate"`
 	CounterChance float64 `json:"counter_chance"`
+	PaveRatio     float64 `json:"pave_ratio"`
+	PaveRate      float64 `json:"pave_rate"`
+	PaveHit       float64 `json:"pave_hit"`
+	TripwireRate  float64 `json:"tripwire_rate"`
 }
 
 func wsHandler(ws *websocket.Conn) {
@@ -1352,7 +1460,13 @@ func wsHandler(ws *websocket.Conn) {
 					Aggr:          m.Aggr,
 					LBDRatio:      m.LBDRatio,
 					LBDKill:       m.LBDKill,
+					LBDRate:       m.LBDRate,
+					GasRate:       m.GasRate,
 					CounterChance: m.CounterChance,
+					PaveRatio:     m.PaveRatio,
+					PaveRate:      m.PaveRate,
+					PaveHit:       m.PaveHit,
+					TripwireRate:  m.TripwireRate,
 				})
 			}
 			simMu.Unlock()
@@ -1420,7 +1534,7 @@ func wsHandler(ws *websocket.Conn) {
 
 		gPoints := make([]GPoint, len(gases))
 		for i := range gases {
-			gPoints[i] = GPoint{X: int16(gases[i].X), Y: int16(gases[i].Y), R: int16(gases[i].R)}
+			gPoints[i] = GPoint{X: int16(gases[i].X), Y: int16(gases[i].Y), R: int16(gases[i].R), B: gases[i].Thrown}
 		}
 
 		resolved := passed + arrested + killed
@@ -1438,7 +1552,13 @@ func wsHandler(ws *websocket.Conn) {
 				Aggr:          cfg.Aggr,
 				LBDRatio:      cfg.LBDRatio,
 				LBDKill:       cfg.LBDKill,
+				LBDRate:       cfg.LBDRate,
+				GasRate:       cfg.GasRate,
 				CounterChance: cfg.CounterChance,
+				PaveRatio:     cfg.PaveRatio,
+				PaveRate:      cfg.PaveRate,
+				PaveHit:       cfg.PaveHit,
+				TripwireRate:  cfg.TripwireRate,
 				Paused:        paused,
 				Stopped:       stopped,
 			},
@@ -1452,6 +1572,7 @@ func wsHandler(ws *websocket.Conn) {
 				Passed:     passed,
 				Arrested:   arrested,
 				Killed:     killed,
+				Paves:      pavesThrown,
 				Panicked:   panicked,
 				Exhausted:  exhausted,
 				Leaders:    leaders,
