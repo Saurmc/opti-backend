@@ -263,6 +263,26 @@
         </div>
       </div>
 
+      <div class="card">
+        <div class="label">Équipement manifestants</div>
+        <div class="val" style="font-size: 0.95rem">
+          <span id="val-goggles" style="color: #34d399; font-weight: bold">0</span>
+          lunettes /
+          <span id="val-umbrellas" style="color: #94a3b8; font-weight: bold">0</span>
+          parapluies
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="label">Fils tendus / CRS à terre</div>
+        <div class="val" style="font-size: 0.95rem">
+          <span id="val-tripwires" style="color: #a3e635; font-weight: bold">0</span>
+          fils /
+          <span id="val-copsdown" style="color: var(--amber); font-weight: bold">0</span>
+          à terre
+        </div>
+      </div>
+
       <div class="legend-box">
         <div class="legend-title">Légende Tactique</div>
         <div class="legend-item">
@@ -272,6 +292,18 @@
         <div class="legend-item">
           <div class="legend-circle" style="background: #06b6d4"></div>
           Civil (suiveur)
+        </div>
+        <div class="legend-item">
+          <div class="legend-circle" style="background: #34d399"></div>
+          Lunettes (immunisé lacrymo)
+        </div>
+        <div class="legend-item">
+          <div class="legend-circle" style="background: #94a3b8"></div>
+          Parapluie (anti canon/LBD)
+        </div>
+        <div class="legend-item">
+          <div class="legend-icon" style="background: #a3e635; height: 3px"></div>
+          Fil tendu
         </div>
         <div class="legend-item">
           <div class="legend-circle" style="background: #fff; box-shadow: 0 0 6px #fff"></div>
@@ -325,13 +357,18 @@
         elPanicked = el("val-panicked"),
         elExhausted = el("val-exhausted"),
         elCops = el("val-cops"),
-        elGases = el("val-gases");
+        elGases = el("val-gases"),
+        elGoggles = el("val-goggles"),
+        elUmbrellas = el("val-umbrellas"),
+        elTripwires = el("val-tripwires"),
+        elCopsDown = el("val-copsdown");
 
       let heatmap = [],
         protesters = [],
         cops = [],
         gases = [],
         kettles = [],
+        tripwires = [],
         obstacles = [],
         objective = null;
       let gridCols = 100,
@@ -394,6 +431,7 @@
           cops = data.cops || [];
           gases = data.gases || [];
           kettles = data.kettles || [];
+          tripwires = data.tripwires || [];
           obstacles = data.obstacles || [];
           objective = data.objective || null;
           gridCols = data.grid_cols;
@@ -430,6 +468,10 @@
           elExhausted.textContent = s.exhausted;
           elCops.textContent = s.cops;
           elGases.textContent = s.gases;
+          elGoggles.textContent = s.goggles;
+          elUmbrellas.textContent = s.umbrellas;
+          elTripwires.textContent = s.tripwires;
+          elCopsDown.textContent = s.cops_down;
         } catch (e) {
           console.error(e);
         }
@@ -495,6 +537,18 @@
           ctx.strokeRect(obs.x * scale, obs.y * scale, obs.w * scale, obs.h * scale);
         }
 
+        // 3b. Fils tendus
+        ctx.strokeStyle = "#a3e635";
+        ctx.lineWidth = 1.2;
+        for (const t of tripwires) {
+          const x = t.x * scale,
+            y = t.y * scale;
+          ctx.beginPath();
+          ctx.moveTo(x - 4, y);
+          ctx.lineTo(x + 4, y);
+          ctx.stroke();
+        }
+
         // 4. Nuages lacrymogènes
         for (const g of gases) {
           const cx = g.x * scale,
@@ -509,17 +563,18 @@
           ctx.fill();
         }
 
-        // 5. Manifestants
+        // 5. Manifestants — taille = meneur, couleur = état/équipement
         for (const p of protesters) {
           const px = p.x * scale,
             py = p.y * scale;
-          if (p.l) {
-            ctx.fillStyle = p.p ? "#ffffff" : "#fb923c";
-            ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
-          } else {
-            ctx.fillStyle = p.p ? "#ffffff" : "rgba(6, 182, 212, 0.55)";
-            ctx.fillRect(px - 1, py - 1, 2, 2);
-          }
+          const sz = p.l ? 3 : 2;
+          let col;
+          if (p.p) col = "#ffffff"; // panique
+          else if (p.g) col = "#34d399"; // lunettes
+          else if (p.u) col = "#94a3b8"; // parapluie
+          else col = p.l ? "#fb923c" : "rgba(6, 182, 212, 0.55)";
+          ctx.fillStyle = col;
+          ctx.fillRect(px - sz / 2, py - sz / 2, sz, sz);
           if (p.e) {
             ctx.strokeStyle = "#64748b";
             ctx.lineWidth = 0.5;

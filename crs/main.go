@@ -34,6 +34,19 @@ const (
 	KettleSealRadius   float64 = 170.0
 	KettleArrestChance float64 = 0.03
 
+	// Équipement manifestants.
+	GogglesRatio         float64 = 0.25 // lunettes : immunité lacrymo
+	UmbrellaRatio        float64 = 0.20 // parapluie : anti canon à eau + LBD (Phase 4)
+	CounterGasChance     float64 = 0.10 // chance de renvoyer une lacrymo vers les CRS
+	CounterGasCd         int16   = 120
+	TripwireDeployChance float64 = 0.004 // par meneur/tick quand des CRS sont proches
+	TripwireRange        float64 = 420.0 // distance CRS déclenchant la pose
+	TripwireRadius       float64 = 65.0
+	TripwireMaxActive    int     = 80
+	TripwireUses         int16   = 3
+	CopFallTicks         int16   = 70 // CRS à terre (immobile)
+	CopSlowTicks         int16   = 80 // puis ralenti en se relevant
+
 	// Géographie de la manif : objectif en haut, départ de la foule en bas, cordon CRS au milieu.
 	ObjectiveY float64 = 450.0  // un manifestant qui atteint Y <= ObjectiveY a "passé"
 	SpawnMinY  float64 = 3300.0 // bande de départ de la foule
@@ -90,8 +103,11 @@ type Protester struct {
 	IsPanicked    bool
 	IsExhausted   bool
 	InGas         bool
+	Goggles       bool // immunité lacrymo
+	Umbrella      bool // anti canon à eau + LBD
 	Stamina       int16
 	PanicTimer    int16
+	CounterCd     int16 // cooldown contre-lacrymo
 	X, Y          float64
 	Speed         float64
 	Determination float64 // 0..1 : volonté d'avancer vers l'objectif
@@ -105,6 +121,14 @@ type Cop struct {
 	WanderAng float64
 	GasCd     int16
 	BlastCd   int16
+	FallTimer int16 // à terre (fil tendu)
+	SlowTimer int16 // ralenti après s'être relevé
+}
+
+// Tripwire : fil tendu par les manifestants, fait tomber les CRS.
+type Tripwire struct {
+	X, Y float64
+	Uses int16
 }
 
 type Gas struct {
@@ -128,6 +152,8 @@ type PPoint struct {
 	L bool  `json:"l"` // leader
 	P bool  `json:"p"` // panique
 	E bool  `json:"e"` // épuisé
+	G bool  `json:"g"` // lunettes
+	U bool  `json:"u"` // parapluie
 }
 
 type CPoint struct {
@@ -159,6 +185,10 @@ type Stats struct {
 	Leaders    int     `json:"leaders"`
 	Civils     int     `json:"civils"`
 	Gases      int     `json:"gases"`
+	Goggles    int     `json:"goggles"`
+	Umbrellas  int     `json:"umbrellas"`
+	Tripwires  int     `json:"tripwires"`
+	CopsDown   int     `json:"cops_down"`
 	PassRate   float64 `json:"pass_rate"`
 	IsFinished bool    `json:"is_finished"`
 }
@@ -182,6 +212,7 @@ type FramePayload struct {
 	Obstacles  []Obstacle `json:"obstacles"`
 	Objective  Rect       `json:"objective"`
 	Kettles    []Rect     `json:"kettles"`
+	Tripwires  []CPoint   `json:"tripwires"`
 	Gases      []GPoint   `json:"gases"`
 	Protesters []PPoint   `json:"protesters"`
 	Cops       []CPoint   `json:"cops"`
@@ -194,6 +225,7 @@ var (
 	cops       []Cop
 	obstacles   []Obstacle
 	gases       []Gas
+	tripwires   []Tripwire
 	segments    []Segment
 	sealedRects []Rect
 	passed      int
@@ -292,6 +324,7 @@ func initSimulation(c SimConfig) {
 	passed = 0
 	arrested = 0
 	gases = nil
+	tripwires = nil
 
 	// Trame de rues : immeubles réguliers séparés par des rues. L'objectif (haut)
 	// et l'avenue centrale restent dégagés. Les angles d'immeubles bordent les rues,
@@ -331,6 +364,8 @@ func initSimulation(c SimConfig) {
 		protesters[i] = Protester{
 			ID:            int64(i),
 			IsLeader:      leader,
+			Goggles:       simRng.Float64() < GogglesRatio,
+			Umbrella:      simRng.Float64() < UmbrellaRatio,
 			Stamina:       MaxStamina - int16(simRng.Intn(20)),
 			X:             x,
 			Y:             y,
@@ -451,9 +486,12 @@ func updateSimulation() {
 		if p.PanicTimer > 0 {
 			p.PanicTimer--
 		}
+		if p.CounterCd > 0 {
+			p.CounterCd--
+		}
 
 		// Nuages de gaz : répulsion + panique + ralentissement.
-		inGas := false
+		inGasRaw := false // dans un nuage, lunettes ou pas
 		var gasFx, gasFy float64
 		for gi := range gases {
 			g := &gases[gi]
@@ -461,20 +499,28 @@ func updateSimulation() {
 			dy := p.Y - g.Y
 			d := math.Hypot(dx, dy)
 			if d < g.R+40.0 {
-				inGas = true
-				p.PanicTimer = PanicDuration
+				inGasRaw = true
 				if d > 1e-6 {
 					gasFx += dx / d
 					gasFy += dy / d
 				}
 			}
 		}
+		// Lunettes : immunité (ni panique ni ralentissement).
+		inGas := inGasRaw && !p.Goggles
+		if inGas {
+			p.PanicTimer = PanicDuration
+		}
 		p.InGas = inGas
 		p.IsPanicked = p.PanicTimer > 0
+
+		// Contre-lacrymo : un porteur de lunettes dans un nuage peut le renvoyer.
+		counterWanted := inGasRaw && p.Goggles && p.CounterCd == 0 && simRng.Float64() < CounterGasChance
 
 		// Scan CRS : répulsion ressentie + données d'interpellation.
 		var copFx, copFy float64
 		nearestCopD := math.MaxFloat64
+		var nearestCopX, nearestCopY float64
 		encircle := 0
 		for ci := range cops {
 			c := &cops[ci]
@@ -483,6 +529,7 @@ func updateSimulation() {
 			d := math.Hypot(dx, dy)
 			if d < nearestCopD {
 				nearestCopD = d
+				nearestCopX, nearestCopY = c.X, c.Y
 			}
 			if d < EncircleRadius {
 				encircle++
@@ -503,6 +550,29 @@ func updateSimulation() {
 					continue
 				}
 			}
+		}
+
+		// Contre-lacrymo : renvoie un nuage près du CRS le plus proche.
+		if counterWanted && nearestCopD < 1200.0 && len(gases) < MaxGases {
+			dx := nearestCopX - p.X
+			dy := nearestCopY - p.Y
+			dl := math.Hypot(dx, dy)
+			if dl < 1e-6 {
+				dl = 1
+			}
+			gases = append(gases, Gas{
+				X:    nearestCopX - dx/dl*60.0,
+				Y:    nearestCopY - dy/dl*60.0,
+				R:    30.0,
+				MaxR: GasMaxRadius * 0.7,
+			})
+			p.CounterCd = CounterGasCd
+		}
+
+		// Fil tendu : un meneur en pose un quand des CRS approchent.
+		if p.IsLeader && nearestCopD < TripwireRange && len(tripwires) < TripwireMaxActive &&
+			simRng.Float64() < TripwireDeployChance {
+			tripwires = append(tripwires, Tripwire{X: p.X, Y: p.Y, Uses: TripwireUses})
 		}
 
 		// Épuisé : immobilisé le temps de récupérer (reste interpellable).
@@ -607,6 +677,40 @@ func updateSimulation() {
 			c.BlastCd--
 		}
 
+		// À terre (fil tendu) : immobile, puis passe en ralenti.
+		if c.FallTimer > 0 {
+			c.FallTimer--
+			if c.FallTimer == 0 {
+				c.SlowTimer = CopSlowTicks
+			}
+			continue
+		}
+		if c.SlowTimer > 0 {
+			c.SlowTimer--
+		} else {
+			// Déclenchement d'un fil tendu (uniquement si pas déjà en train de récupérer).
+			for ti := range tripwires {
+				t := &tripwires[ti]
+				if t.Uses <= 0 {
+					continue
+				}
+				dx := c.X - t.X
+				dy := c.Y - t.Y
+				if dx*dx+dy*dy < TripwireRadius*TripwireRadius {
+					c.FallTimer = CopFallTicks
+					t.Uses--
+					break
+				}
+			}
+			if c.FallTimer > 0 {
+				continue
+			}
+		}
+		copSpeed := c.Speed
+		if c.SlowTimer > 0 {
+			copSpeed *= 0.5
+		}
+
 		var targetFront *Protester
 		frontD2 := math.MaxFloat64
 		var targetAny *Protester
@@ -703,22 +807,22 @@ func updateSimulation() {
 			if d < 1e-6 {
 				d = 1
 			}
-			dx = tx / d * c.Speed * speedFactor
-			dy = ty / d * c.Speed * speedFactor
+			dx = tx / d * copSpeed * speedFactor
+			dy = ty / d * copSpeed * speedFactor
 		} else {
 			tx := crowdX - c.X
 			ty := crowdY - c.Y
 			d := math.Hypot(tx, ty)
 			if d > 1e-6 {
-				dx = tx / d * c.Speed * 0.7
-				dy = ty / d * c.Speed * 0.7
+				dx = tx / d * copSpeed * 0.7
+				dy = ty / d * copSpeed * 0.7
 			}
 		}
 		dx += (simRng.Float64() - 0.5) * 0.5
 		dy += (simRng.Float64() - 0.5) * 0.5
 
 		// Contournement des immeubles (débloque les CRS coincés sur les angles).
-		if nx, ny, ok := stepAround(c.X, c.Y, dx, dy, c.Speed); ok {
+		if nx, ny, ok := stepAround(c.X, c.Y, dx, dy, copSpeed); ok {
 			c.X, c.Y = nx, ny
 		}
 	}
@@ -782,6 +886,17 @@ func updateSimulation() {
 		}
 		gases = kept
 	}
+
+	// 3b. Retrait des fils tendus épuisés.
+	if len(tripwires) > 0 {
+		kept := tripwires[:0]
+		for ti := range tripwires {
+			if tripwires[ti].Uses > 0 {
+				kept = append(kept, tripwires[ti])
+			}
+		}
+		tripwires = kept
+	}
 }
 
 func generateHeatmap() []int {
@@ -802,7 +917,7 @@ func generateHeatmap() []int {
 	return grid
 }
 
-func getCounts() (active, panicked, exhausted, leaders, civils int) {
+func getCounts() (active, panicked, exhausted, leaders, civils, goggles, umbrellas int) {
 	for i := range protesters {
 		p := &protesters[i]
 		if p.Arrested || p.Passed {
@@ -819,6 +934,12 @@ func getCounts() (active, panicked, exhausted, leaders, civils int) {
 		}
 		if p.IsExhausted {
 			exhausted++
+		}
+		if p.Goggles {
+			goggles++
+		}
+		if p.Umbrella {
+			umbrellas++
 		}
 	}
 	return
@@ -886,7 +1007,7 @@ func wsHandler(ws *websocket.Conn) {
 			lastCheck = time.Now()
 		}
 
-		active, panicked, exhausted, leaders, civils := getCounts()
+		active, panicked, exhausted, leaders, civils, goggles, umbrellas := getCounts()
 		isFinished := (active == 0)
 
 		pPoints := make([]PPoint, 0, active)
@@ -901,12 +1022,23 @@ func wsHandler(ws *websocket.Conn) {
 				L: p.IsLeader,
 				P: p.IsPanicked,
 				E: p.IsExhausted,
+				G: p.Goggles,
+				U: p.Umbrella,
 			})
 		}
 
+		copsDown := 0
 		cPoints := make([]CPoint, len(cops))
 		for i := range cops {
 			cPoints[i] = CPoint{X: int16(cops[i].X), Y: int16(cops[i].Y)}
+			if cops[i].FallTimer > 0 {
+				copsDown++
+			}
+		}
+
+		twPoints := make([]CPoint, len(tripwires))
+		for i := range tripwires {
+			twPoints[i] = CPoint{X: int16(tripwires[i].X), Y: int16(tripwires[i].Y)}
 		}
 
 		gPoints := make([]GPoint, len(gases))
@@ -944,12 +1076,17 @@ func wsHandler(ws *websocket.Conn) {
 				Leaders:    leaders,
 				Civils:     civils,
 				Gases:      len(gases),
+				Goggles:    goggles,
+				Umbrellas:  umbrellas,
+				Tripwires:  len(tripwires),
+				CopsDown:   copsDown,
 				PassRate:   math.Round(rate*10) / 10,
 				IsFinished: isFinished,
 			},
 			Obstacles:  obstacles,
 			Objective:  Rect{X: 0, Y: 0, W: WorldSize, H: ObjectiveY},
 			Kettles:    sealedRects,
+			Tripwires:  twPoints,
 			Gases:      gPoints,
 			Protesters: pPoints,
 			Cops:       cPoints,
