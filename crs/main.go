@@ -76,6 +76,8 @@ const (
 	PavePush    float64 = 36.0 // recul infligé au CRS touché
 	PaveStagger int16   = 45   // CRS étourdi (ralenti)
 	PaveKnock   float64 = 0.18 // chance de faire tomber le CRS
+	PaveKill    float64 = 0.05 // chance qu'un pavé mette un CRS hors de combat
+	ShotLife    int     = 6    // durée d'affichage d'un tir (ticks)
 
 	// Géographie de la manif : objectif en haut, départ de la foule en bas, cordon CRS au milieu.
 	ObjectiveY float64 = 450.0  // un manifestant qui atteint Y <= ObjectiveY a "passé"
@@ -156,8 +158,16 @@ type Cop struct {
 	BlastCd   int16
 	FallTimer int16 // à terre (fil tendu)
 	SlowTimer int16 // ralenti après s'être relevé
-	HasLBD    bool  // équipé d'un lanceur LBD
-	LBDCd     int16 // cooldown LBD
+	HasLBD     bool  // équipé d'un lanceur LBD
+	LBDCd      int16 // cooldown LBD
+	Eliminated bool  // mis hors de combat (pavé)
+}
+
+// Shot : tir à visualiser quelques ticks (pavé ou LBD).
+type Shot struct {
+	X0, Y0, X1, Y1 float64
+	Kind           int // 0 = pavé, 1 = LBD
+	Age            int
 }
 
 // WaterCannon : camion à eau fixe projetant un jet en cône.
@@ -216,6 +226,15 @@ type CannonPoint struct {
 	A float64 `json:"a"` // angle du jet
 }
 
+type ShotPoint struct {
+	X0 int16 `json:"x0"`
+	Y0 int16 `json:"y0"`
+	X1 int16 `json:"x1"`
+	Y1 int16 `json:"y1"`
+	K  int8  `json:"k"` // 0 = pavé, 1 = LBD
+	A  int8  `json:"a"` // âge (fade)
+}
+
 type Rect struct {
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
@@ -226,6 +245,7 @@ type Rect struct {
 type Stats struct {
 	Seed       int64   `json:"seed"`
 	Cops       int     `json:"cops"`
+	CopsGone   int     `json:"cops_gone"`
 	Active     int     `json:"active"`
 	Passed     int     `json:"passed"`
 	Arrested   int     `json:"arrested"`
@@ -274,6 +294,7 @@ type FramePayload struct {
 	Kettles    []Rect        `json:"kettles"`
 	Tripwires  []CPoint      `json:"tripwires"`
 	Cannons    []CannonPoint `json:"cannons"`
+	Shots      []ShotPoint   `json:"shots"`
 	Gases      []GPoint      `json:"gases"`
 	Protesters []PPoint      `json:"protesters"`
 	Cops       []CPoint      `json:"cops"`
@@ -285,15 +306,17 @@ var (
 	protesters   []Protester
 	cops         []Cop
 	obstacles    []Obstacle
-	gases        []Gas
-	tripwires    []Tripwire
-	waterCannons []WaterCannon
-	segments     []Segment
-	sealedRects  []Rect
-	passed       int
-	arrested     int
-	killed       int
-	pavesThrown  int
+	gases          []Gas
+	tripwires      []Tripwire
+	waterCannons   []WaterCannon
+	shots          []Shot
+	segments       []Segment
+	sealedRects    []Rect
+	passed         int
+	arrested       int
+	killed         int
+	pavesThrown    int
+	copsEliminated int
 
 	// Navigation.
 	navBlocked []bool
@@ -622,9 +645,11 @@ func initSimulation(c SimConfig) {
 	arrested = 0
 	killed = 0
 	pavesThrown = 0
+	copsEliminated = 0
 	gases = nil
 	tripwires = nil
 	waterCannons = nil
+	shots = nil
 
 	// Trame de rues : immeubles réguliers séparés par des rues. L'objectif (haut)
 	// et l'avenue centrale restent dégagés. Les angles d'immeubles bordent les rues,
@@ -854,6 +879,9 @@ func updateSimulation() {
 		encircle := 0
 		for ci := range cops {
 			c := &cops[ci]
+			if c.Eliminated {
+				continue
+			}
 			dx := p.X - c.X
 			dy := p.Y - c.Y
 			d := math.Hypot(dx, dy)
@@ -912,8 +940,9 @@ func updateSimulation() {
 			nearestCopIdx >= 0 && nearestCopD < PaveRange {
 			p.PaveCd = rateToCd(cfg.PaveRate)
 			pavesThrown++
+			c := &cops[nearestCopIdx]
+			shots = append(shots, Shot{X0: p.X, Y0: p.Y, X1: c.X, Y1: c.Y, Kind: 0})
 			if simRng.Float64() < cfg.PaveHit {
-				c := &cops[nearestCopIdx]
 				dx := c.X - p.X
 				dy := c.Y - p.Y
 				d := math.Hypot(dx, dy)
@@ -929,7 +958,10 @@ func updateSimulation() {
 				if c.SlowTimer < PaveStagger {
 					c.SlowTimer = PaveStagger
 				}
-				if simRng.Float64() < PaveKnock {
+				if simRng.Float64() < PaveKill {
+					c.Eliminated = true
+					copsEliminated++
+				} else if simRng.Float64() < PaveKnock {
 					c.FallTimer = CopFallTicks / 2
 				}
 			}
@@ -1036,6 +1068,9 @@ func updateSimulation() {
 	// 2. CRS : interception, lacrymo, grenade de désencerclement.
 	for i := range cops {
 		c := &cops[i]
+		if c.Eliminated {
+			continue
+		}
 		if c.GasCd > 0 {
 			c.GasCd--
 		}
@@ -1165,6 +1200,7 @@ func updateSimulation() {
 			}
 			if c.LBDCd == 0 && cfg.LBDRate > 0 && targetFront != nil && frontD2 < LBDRange*LBDRange {
 				impactX, impactY := targetFront.X, targetFront.Y
+				shots = append(shots, Shot{X0: c.X, Y0: c.Y, X1: impactX, Y1: impactY, Kind: 1})
 				kc := cfg.LBDKill
 				if targetFront.Umbrella {
 					kc *= UmbrellaKillFactor
@@ -1259,6 +1295,9 @@ func updateSimulation() {
 		copA, copB := false, false
 		for ci := range cops {
 			c := &cops[ci]
+			if c.Eliminated {
+				continue
+			}
 			if !copA {
 				dx, dy := c.X-seg.AX, c.Y-seg.AY
 				if dx*dx+dy*dy <= r2 {
@@ -1348,6 +1387,18 @@ func updateSimulation() {
 			}
 		}
 		gases = kept
+	}
+
+	// 3c. Vieillissement des traceurs de tir.
+	if len(shots) > 0 {
+		kept := shots[:0]
+		for si := range shots {
+			shots[si].Age++
+			if shots[si].Age <= ShotLife {
+				kept = append(kept, shots[si])
+			}
+		}
+		shots = kept
 	}
 
 	// 3b. Retrait des fils tendus épuisés.
@@ -1514,11 +1565,24 @@ func wsHandler(ws *websocket.Conn) {
 		}
 
 		copsDown := 0
-		cPoints := make([]CPoint, len(cops))
+		cPoints := make([]CPoint, 0, len(cops))
 		for i := range cops {
-			cPoints[i] = CPoint{X: int16(cops[i].X), Y: int16(cops[i].Y)}
+			if cops[i].Eliminated {
+				continue
+			}
+			cPoints = append(cPoints, CPoint{X: int16(cops[i].X), Y: int16(cops[i].Y)})
 			if cops[i].FallTimer > 0 {
 				copsDown++
+			}
+		}
+		activeCops := len(cPoints)
+
+		shotPoints := make([]ShotPoint, len(shots))
+		for i := range shots {
+			shotPoints[i] = ShotPoint{
+				X0: int16(shots[i].X0), Y0: int16(shots[i].Y0),
+				X1: int16(shots[i].X1), Y1: int16(shots[i].Y1),
+				K: int8(shots[i].Kind), A: int8(shots[i].Age),
 			}
 		}
 
@@ -1567,7 +1631,8 @@ func wsHandler(ws *websocket.Conn) {
 			GridRows:  GridRows,
 			Stats: Stats{
 				Seed:       cfg.Seed,
-				Cops:       len(cops),
+				Cops:       activeCops,
+				CopsGone:   copsEliminated,
 				Active:     active,
 				Passed:     passed,
 				Arrested:   arrested,
@@ -1590,6 +1655,7 @@ func wsHandler(ws *websocket.Conn) {
 			Kettles:    sealedRects,
 			Tripwires:  twPoints,
 			Cannons:    caPoints,
+			Shots:      shotPoints,
 			Gases:      gPoints,
 			Protesters: pPoints,
 			Cops:       cPoints,

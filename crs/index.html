@@ -286,7 +286,9 @@
           <span id="val-cops" style="color: var(--blue); font-weight: bold">0</span>
           agents /
           <span id="val-gases" style="color: var(--amber); font-weight: bold">0</span>
-          lacrymos
+          lacrymos /
+          <span id="val-copsgone" style="color: var(--red); font-weight: bold">0</span>
+          éliminés
         </div>
       </div>
 
@@ -345,6 +347,14 @@
         <div class="legend-item">
           <div class="legend-icon" style="background: rgba(96, 165, 250, 0.4); border: 1px solid #1d4ed8"></div>
           Canon à eau (jet)
+        </div>
+        <div class="legend-item">
+          <div class="legend-icon" style="background: #a3e635; height: 2px"></div>
+          Jet de pavé
+        </div>
+        <div class="legend-item">
+          <div class="legend-icon" style="background: #f87171; height: 2px"></div>
+          Tir LBD
         </div>
         <div class="legend-item">
           <div class="legend-circle" style="background: #fff; box-shadow: 0 0 6px #fff"></div>
@@ -461,6 +471,7 @@
         elUmbrellas = el("val-umbrellas"),
         elTripwires = el("val-tripwires"),
         elCopsDown = el("val-copsdown"),
+        elCopsGone = el("val-copsgone"),
         elKilled = el("val-killed"),
         elPaves = el("val-paves");
 
@@ -471,6 +482,7 @@
         kettles = [],
         tripwires = [],
         cannons = [],
+        shots = [],
         obstacles = [],
         objective = null;
       let gridCols = 100,
@@ -571,6 +583,7 @@
           kettles = data.kettles || [];
           tripwires = data.tripwires || [];
           cannons = data.cannons || [];
+          shots = data.shots || [];
           obstacles = data.obstacles || [];
           objective = data.objective || null;
           gridCols = data.grid_cols;
@@ -629,6 +642,7 @@
           elUmbrellas.textContent = s.umbrellas;
           elTripwires.textContent = s.tripwires;
           elCopsDown.textContent = s.cops_down;
+          elCopsGone.textContent = s.cops_gone;
           elKilled.textContent = s.killed;
           elPaves.textContent = s.paves;
         } catch (e) {
@@ -774,6 +788,18 @@
           ctx.lineWidth = 0.5;
           ctx.strokeRect(px - 2, py - 2, 4, 4);
         }
+
+        // 7. Traceurs de tir (pavé = vert, LBD = rouge), fondu selon l'âge
+        for (const sh of shots) {
+          ctx.globalAlpha = Math.max(0.15, 1 - sh.a / 7);
+          ctx.strokeStyle = sh.k === 1 ? "#f87171" : "#a3e635";
+          ctx.lineWidth = sh.k === 1 ? 1.5 : 1;
+          ctx.beginPath();
+          ctx.moveTo(sh.x0 * scale, sh.y0 * scale);
+          ctx.lineTo(sh.x1 * scale, sh.y1 * scale);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
 
         frames++;
         const now = performance.now();
