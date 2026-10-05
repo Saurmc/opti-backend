@@ -200,6 +200,15 @@
         <label>Agressivité CRS <span id="lbl-aggr">1.0</span>
           <input type="range" id="sl-aggr" min="0.5" max="3" step="0.1" value="1" />
         </label>
+        <label>LBD (% des CRS) <span id="lbl-lbd">15</span>
+          <input type="range" id="sl-lbd" min="0" max="100" step="5" value="15" />
+        </label>
+        <label>Létalité LBD (%) <span id="lbl-kill">5</span>
+          <input type="range" id="sl-kill" min="0" max="50" step="1" value="5" />
+        </label>
+        <label>Renvoi lacrymo (%) <span id="lbl-counter">10</span>
+          <input type="range" id="sl-counter" min="0" max="100" step="5" value="10" />
+        </label>
         <label>Seed
           <input type="number" id="in-seed" value="42" />
         </label>
@@ -354,6 +363,60 @@
       const ctx = canvas.getContext("2d", { alpha: false });
       const dot = document.getElementById("dot");
 
+      // --- Zoom / pan ---
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+      const view = { zoom: 1, ox: 0, oy: 0 };
+      function clampPan() {
+        const w = canvas.width,
+          h = canvas.height;
+        view.ox = clamp(view.ox, w * (1 - view.zoom), 0);
+        view.oy = clamp(view.oy, h * (1 - view.zoom), 0);
+      }
+      canvas.addEventListener(
+        "wheel",
+        (e) => {
+          e.preventDefault();
+          const rect = canvas.getBoundingClientRect();
+          const mx = ((e.clientX - rect.left) / rect.width) * canvas.width;
+          const my = ((e.clientY - rect.top) / rect.height) * canvas.height;
+          const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+          const nz = clamp(view.zoom * factor, 1, 10);
+          view.ox = mx - (mx - view.ox) * (nz / view.zoom);
+          view.oy = my - (my - view.oy) * (nz / view.zoom);
+          view.zoom = nz;
+          clampPan();
+        },
+        { passive: false },
+      );
+      let dragging = false,
+        lastX = 0,
+        lastY = 0;
+      canvas.addEventListener("mousedown", (e) => {
+        dragging = true;
+        lastX = e.clientX;
+        lastY = e.clientY;
+        canvas.style.cursor = "grabbing";
+      });
+      window.addEventListener("mouseup", () => {
+        dragging = false;
+        canvas.style.cursor = "grab";
+      });
+      window.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        const rect = canvas.getBoundingClientRect();
+        view.ox += ((e.clientX - lastX) / rect.width) * canvas.width;
+        view.oy += ((e.clientY - lastY) / rect.height) * canvas.height;
+        lastX = e.clientX;
+        lastY = e.clientY;
+        clampPan();
+      });
+      canvas.addEventListener("dblclick", () => {
+        view.zoom = 1;
+        view.ox = 0;
+        view.oy = 0;
+      });
+      canvas.style.cursor = "grab";
+
       const el = (id) => document.getElementById(id);
       const elSeed = el("val-seed"),
         elTps = el("val-tps"),
@@ -406,10 +469,16 @@
       const slProt = el("sl-prot"),
         slCops = el("sl-cops"),
         slAggr = el("sl-aggr"),
+        slLbd = el("sl-lbd"),
+        slKill = el("sl-kill"),
+        slCounter = el("sl-counter"),
         inSeed = el("in-seed");
       const lblProt = el("lbl-prot"),
         lblCops = el("lbl-cops"),
-        lblAggr = el("lbl-aggr");
+        lblAggr = el("lbl-aggr"),
+        lblLbd = el("lbl-lbd"),
+        lblKill = el("lbl-kill"),
+        lblCounter = el("lbl-counter");
       const btnPlay = el("btn-play"),
         btnRestart = el("btn-restart"),
         btnStop = el("btn-stop");
@@ -421,6 +490,9 @@
       slCops.oninput = () => (lblCops.textContent = slCops.value);
       slAggr.oninput = () =>
         (lblAggr.textContent = parseFloat(slAggr.value).toFixed(1));
+      slLbd.oninput = () => (lblLbd.textContent = slLbd.value);
+      slKill.oninput = () => (lblKill.textContent = slKill.value);
+      slCounter.oninput = () => (lblCounter.textContent = slCounter.value);
 
       btnPlay.onclick = () =>
         send({ cmd: srvPaused || srvStopped ? "play" : "pause" });
@@ -432,6 +504,9 @@
           protesters: parseInt(slProt.value, 10),
           cops: parseInt(slCops.value, 10),
           aggr: parseFloat(slAggr.value),
+          lbd_ratio: parseInt(slLbd.value, 10) / 100,
+          lbd_kill: parseInt(slKill.value, 10) / 100,
+          counter_chance: parseInt(slCounter.value, 10) / 100,
         });
 
       ws.onmessage = (event) => {
@@ -459,6 +534,12 @@
               lblCops.textContent = c.cops;
               slAggr.value = c.aggr;
               lblAggr.textContent = c.aggr.toFixed(1);
+              slLbd.value = Math.round(c.lbd_ratio * 100);
+              lblLbd.textContent = slLbd.value;
+              slKill.value = Math.round(c.lbd_kill * 100);
+              lblKill.textContent = slKill.value;
+              slCounter.value = Math.round(c.counter_chance * 100);
+              lblCounter.textContent = slCounter.value;
               inSeed.value = c.seed;
               cfgSynced = true;
             }
@@ -494,8 +575,10 @@
         lastCheck = performance.now();
 
       function render() {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.fillStyle = "#05070e";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.setTransform(view.zoom, 0, 0, view.zoom, view.ox, view.oy);
 
         const scale = canvas.width / worldSize;
         const cellW = canvas.width / gridCols;

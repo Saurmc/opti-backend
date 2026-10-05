@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/heap"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -46,6 +47,11 @@ const (
 	TripwireUses         int16   = 3
 	CopFallTicks         int16   = 70 // CRS à terre (immobile)
 	CopSlowTicks         int16   = 80 // puis ralenti en se relevant
+
+	// Navigation (flow field vers l'objectif, contournement des rues gazées).
+	NavN       int = 100 // résolution de la grille de navigation
+	NavRecalc  int = 15 // recalcul du champ tous les N ticks
+	NavGasCost int = 12 // pénalité d'une cellule gazée
 
 	// Armes CRS.
 	WaterCannonPer      int     = 40 // 1 canon pour N CRS
@@ -228,12 +234,15 @@ type Stats struct {
 }
 
 type ConfigEcho struct {
-	Seed       int64   `json:"seed"`
-	Protesters int     `json:"protesters"`
-	Cops       int     `json:"cops"`
-	Aggr       float64 `json:"aggr"`
-	Paused     bool    `json:"paused"`
-	Stopped    bool    `json:"stopped"`
+	Seed          int64   `json:"seed"`
+	Protesters    int     `json:"protesters"`
+	Cops          int     `json:"cops"`
+	Aggr          float64 `json:"aggr"`
+	LBDRatio      float64 `json:"lbd_ratio"`
+	LBDKill       float64 `json:"lbd_kill"`
+	CounterChance float64 `json:"counter_chance"`
+	Paused        bool    `json:"paused"`
+	Stopped       bool    `json:"stopped"`
 }
 
 type FramePayload struct {
@@ -268,6 +277,12 @@ var (
 	arrested     int
 	killed       int
 
+	// Navigation.
+	navBlocked []bool
+	navDirX    []float64
+	navDirY    []float64
+	navTick    int
+
 	// Contrôle de simulation.
 	simMu   sync.Mutex
 	cfg     SimConfig
@@ -275,16 +290,207 @@ var (
 	stopped bool
 )
 
+// Tas pour Dijkstra du flow field.
+type navNode struct {
+	cell int
+	dist int
+}
+type navHeap []navNode
+
+func (h navHeap) Len() int            { return len(h) }
+func (h navHeap) Less(i, j int) bool  { return h[i].dist < h[j].dist }
+func (h navHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *navHeap) Push(x interface{}) { *h = append(*h, x.(navNode)) }
+func (h *navHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	it := old[n-1]
+	*h = old[:n-1]
+	return it
+}
+
+// initNav marque les cellules bloquées (murs/immeubles) une fois la carte générée.
+func initNav() {
+	navBlocked = make([]bool, NavN*NavN)
+	navDirX = make([]float64, NavN*NavN)
+	navDirY = make([]float64, NavN*NavN)
+	cell := WorldSize / float64(NavN)
+	for i := range navBlocked {
+		gx := i % NavN
+		gy := i / NavN
+		x := (float64(gx) + 0.5) * cell
+		y := (float64(gy) + 0.5) * cell
+		navBlocked[i] = collides(x, y)
+	}
+	navTick = 0
+}
+
+// computeNavField : Dijkstra multi-source depuis l'objectif, pénalisant le gaz.
+func computeNavField() {
+	n := NavN * NavN
+	cell := WorldSize / float64(NavN)
+	dist := make([]int, n)
+	const INF = int(1) << 30
+	for i := range dist {
+		dist[i] = INF
+	}
+
+	// Coût d'entrée par cellule (1 + pénalité gaz).
+	enter := make([]int, n)
+	for i := 0; i < n; i++ {
+		enter[i] = 1
+		if navBlocked[i] {
+			continue
+		}
+		gx := i % NavN
+		gy := i / NavN
+		x := (float64(gx) + 0.5) * cell
+		y := (float64(gy) + 0.5) * cell
+		for gi := range gases {
+			dx := x - gases[gi].X
+			dy := y - gases[gi].Y
+			rr := gases[gi].R + 40.0
+			if dx*dx+dy*dy < rr*rr {
+				enter[i] = 1 + NavGasCost
+				break
+			}
+		}
+	}
+
+	h := &navHeap{}
+	heap.Init(h)
+	for i := 0; i < n; i++ {
+		if navBlocked[i] {
+			continue
+		}
+		gy := i / NavN
+		y := (float64(gy) + 0.5) * cell
+		if y <= ObjectiveY {
+			dist[i] = 0
+			heap.Push(h, navNode{i, 0})
+		}
+	}
+
+	for h.Len() > 0 {
+		cur := heap.Pop(h).(navNode)
+		if cur.dist > dist[cur.cell] {
+			continue
+		}
+		gx := cur.cell % NavN
+		gy := cur.cell / NavN
+		nbs := [4]int{}
+		cnt := 0
+		if gx > 0 {
+			nbs[cnt] = cur.cell - 1
+			cnt++
+		}
+		if gx < NavN-1 {
+			nbs[cnt] = cur.cell + 1
+			cnt++
+		}
+		if gy > 0 {
+			nbs[cnt] = cur.cell - NavN
+			cnt++
+		}
+		if gy < NavN-1 {
+			nbs[cnt] = cur.cell + NavN
+			cnt++
+		}
+		for k := 0; k < cnt; k++ {
+			nb := nbs[k]
+			if navBlocked[nb] {
+				continue
+			}
+			nd := cur.dist + enter[nb]
+			if nd < dist[nb] {
+				dist[nb] = nd
+				heap.Push(h, navNode{nb, nd})
+			}
+		}
+	}
+
+	// Direction = vers le voisin de plus faible distance.
+	for i := 0; i < n; i++ {
+		navDirX[i] = 0
+		navDirY[i] = 0
+		if navBlocked[i] || dist[i] == INF {
+			continue
+		}
+		gx := i % NavN
+		gy := i / NavN
+		best := dist[i]
+		bx, by := 0, 0
+		if gx > 0 && !navBlocked[i-1] && dist[i-1] < best {
+			best = dist[i-1]
+			bx, by = -1, 0
+		}
+		if gx < NavN-1 && !navBlocked[i+1] && dist[i+1] < best {
+			best = dist[i+1]
+			bx, by = 1, 0
+		}
+		if gy > 0 && !navBlocked[i-NavN] && dist[i-NavN] < best {
+			best = dist[i-NavN]
+			bx, by = 0, -1
+		}
+		if gy < NavN-1 && !navBlocked[i+NavN] && dist[i+NavN] < best {
+			best = dist[i+NavN]
+			bx, by = 0, 1
+		}
+		navDirX[i] = float64(bx)
+		navDirY[i] = float64(by)
+	}
+}
+
+// navDirAt renvoie la direction du flow field à une position monde.
+func navDirAt(x, y float64) (float64, float64) {
+	cell := WorldSize / float64(NavN)
+	gx := int(x / cell)
+	gy := int(y / cell)
+	if gx < 0 || gx >= NavN || gy < 0 || gy >= NavN {
+		return 0, -1
+	}
+	i := gy*NavN + gx
+	dx, dy := navDirX[i], navDirY[i]
+	if dx == 0 && dy == 0 {
+		// Cellule sans direction (bord d'immeuble) : récupérer celle d'un voisin.
+		if gx > 0 && (navDirX[i-1] != 0 || navDirY[i-1] != 0) {
+			return navDirX[i-1], navDirY[i-1]
+		}
+		if gx < NavN-1 && (navDirX[i+1] != 0 || navDirY[i+1] != 0) {
+			return navDirX[i+1], navDirY[i+1]
+		}
+		if gy > 0 && (navDirX[i-NavN] != 0 || navDirY[i-NavN] != 0) {
+			return navDirX[i-NavN], navDirY[i-NavN]
+		}
+		if gy < NavN-1 && (navDirX[i+NavN] != 0 || navDirY[i+NavN] != 0) {
+			return navDirX[i+NavN], navDirY[i+NavN]
+		}
+		return 0, -1 // repli : vers le haut
+	}
+	return dx, dy
+}
+
 // SimConfig : paramètres pilotables appliqués au (re)démarrage.
 type SimConfig struct {
-	Seed       int64
-	Protesters int
-	Cops       int
-	Aggr       float64 // agressivité CRS (0.5..2.0)
+	Seed          int64
+	Protesters    int
+	Cops          int
+	Aggr          float64 // agressivité CRS (0.5..3.0)
+	LBDRatio      float64 // fraction de CRS équipés d'un LBD
+	LBDKill       float64 // probabilité de tuer au LBD
+	CounterChance float64 // probabilité de renvoi de lacrymo
 }
 
 func defaultConfig() SimConfig {
-	return SimConfig{Seed: MasterSeed, Protesters: TotalProtesters, Cops: TotalCops, Aggr: 1.0}
+	return SimConfig{
+		Seed:          MasterSeed,
+		Protesters:    TotalProtesters,
+		Cops:          TotalCops,
+		Aggr:          1.0,
+		LBDRatio:      LBDCopRatio,
+		LBDKill:       LBDKillChance,
+		CounterChance: CounterGasChance,
+	}
 }
 
 func collides(x, y float64) bool {
@@ -354,6 +560,9 @@ func initSimulation(c SimConfig) {
 	if c.Aggr <= 0 {
 		c.Aggr = 1.0
 	}
+	c.LBDRatio = math.Max(0, math.Min(1, c.LBDRatio))
+	c.LBDKill = math.Max(0, math.Min(1, c.LBDKill))
+	c.CounterChance = math.Max(0, math.Min(1, c.CounterChance))
 	cfg = c
 	paused = false
 	stopped = false
@@ -426,7 +635,7 @@ func initSimulation(c SimConfig) {
 			Y:         y,
 			Speed:     2.5 + simRng.Float64()*0.4,
 			WanderAng: simRng.Float64() * 2 * math.Pi,
-			HasLBD:    simRng.Float64() < LBDCopRatio,
+			HasLBD:    simRng.Float64() < c.LBDRatio,
 		}
 	}
 
@@ -489,6 +698,8 @@ func initSimulation(c SimConfig) {
 			})
 		}
 	}
+
+	initNav()
 }
 
 func updateSimulation() {
@@ -502,6 +713,12 @@ func updateSimulation() {
 	if gasThresh < 1 {
 		gasThresh = 1
 	}
+
+	// Recalcul périodique du flow field (le gaz bouge => itinéraires de contournement).
+	if navTick%NavRecalc == 0 {
+		computeNavField()
+	}
+	navTick++
 
 	// Pré-passe : centre de gravité de la foule active + indices des meneurs.
 	var sumX, sumY, activeCount float64
@@ -571,7 +788,7 @@ func updateSimulation() {
 		p.IsPanicked = p.PanicTimer > 0
 
 		// Contre-lacrymo : un porteur de lunettes dans un nuage peut le renvoyer.
-		counterWanted := inGasRaw && p.Goggles && p.CounterCd == 0 && simRng.Float64() < CounterGasChance
+		counterWanted := inGasRaw && p.Goggles && p.CounterCd == 0 && simRng.Float64() < cfg.CounterChance
 
 		// Scan CRS : répulsion ressentie + données d'interpellation.
 		var copFx, copFy float64
@@ -646,7 +863,10 @@ func updateSimulation() {
 		if p.IsPanicked {
 			goalW *= 0.1
 		}
-		fy += -1.0 * goalW // objectif = vers le haut (Y décroissant)
+		// Objectif via flow field (routage par les rues, contournement du gaz).
+		ndx, ndy := navDirAt(p.X, p.Y)
+		fx += ndx * goalW
+		fy += ndy * goalW
 
 		copW := 1.4 - p.Determination // les meneurs résistent mieux au cordon
 		if p.IsPanicked {
@@ -858,7 +1078,7 @@ func updateSimulation() {
 			}
 			if c.LBDCd == 0 && targetFront != nil && frontD2 < LBDRange*LBDRange {
 				impactX, impactY := targetFront.X, targetFront.Y
-				kc := LBDKillChance
+				kc := cfg.LBDKill
 				if targetFront.Umbrella {
 					kc *= UmbrellaKillFactor
 				}
@@ -1087,11 +1307,14 @@ func getCounts() (active, panicked, exhausted, leaders, civils, goggles, umbrell
 }
 
 type controlMsg struct {
-	Cmd        string  `json:"cmd"`
-	Seed       int64   `json:"seed"`
-	Protesters int     `json:"protesters"`
-	Cops       int     `json:"cops"`
-	Aggr       float64 `json:"aggr"`
+	Cmd           string  `json:"cmd"`
+	Seed          int64   `json:"seed"`
+	Protesters    int     `json:"protesters"`
+	Cops          int     `json:"cops"`
+	Aggr          float64 `json:"aggr"`
+	LBDRatio      float64 `json:"lbd_ratio"`
+	LBDKill       float64 `json:"lbd_kill"`
+	CounterChance float64 `json:"counter_chance"`
 }
 
 func wsHandler(ws *websocket.Conn) {
@@ -1122,7 +1345,15 @@ func wsHandler(ws *websocket.Conn) {
 			case "stop":
 				stopped = true
 			case "restart":
-				initSimulation(SimConfig{Seed: m.Seed, Protesters: m.Protesters, Cops: m.Cops, Aggr: m.Aggr})
+				initSimulation(SimConfig{
+					Seed:          m.Seed,
+					Protesters:    m.Protesters,
+					Cops:          m.Cops,
+					Aggr:          m.Aggr,
+					LBDRatio:      m.LBDRatio,
+					LBDKill:       m.LBDKill,
+					CounterChance: m.CounterChance,
+				})
 			}
 			simMu.Unlock()
 		}
@@ -1201,12 +1432,15 @@ func wsHandler(ws *websocket.Conn) {
 		payload := FramePayload{
 			TPS: currentTPS,
 			Config: ConfigEcho{
-				Seed:       cfg.Seed,
-				Protesters: cfg.Protesters,
-				Cops:       cfg.Cops,
-				Aggr:       cfg.Aggr,
-				Paused:     paused,
-				Stopped:    stopped,
+				Seed:          cfg.Seed,
+				Protesters:    cfg.Protesters,
+				Cops:          cfg.Cops,
+				Aggr:          cfg.Aggr,
+				LBDRatio:      cfg.LBDRatio,
+				LBDKill:       cfg.LBDKill,
+				CounterChance: cfg.CounterChance,
+				Paused:        paused,
+				Stopped:       stopped,
 			},
 			WorldSize: WorldSize,
 			GridCols:  GridCols,
