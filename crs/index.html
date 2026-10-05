@@ -129,11 +129,81 @@
         box-shadow: 0 0 35px rgba(0, 0, 0, 0.8);
         background: #000;
       }
+
+      .controls {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        background: #0b1120;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px 12px;
+      }
+      .btn-row {
+        display: flex;
+        gap: 6px;
+      }
+      .controls button {
+        flex: 1;
+        background: #1e293b;
+        color: var(--text);
+        border: 1px solid #334155;
+        border-radius: 4px;
+        padding: 6px 4px;
+        cursor: pointer;
+        font-size: 0.72rem;
+        font-family: inherit;
+      }
+      .controls button:hover {
+        background: #334155;
+      }
+      .controls label {
+        font-size: 0.64rem;
+        color: var(--muted);
+        text-transform: uppercase;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .controls input[type="range"] {
+        width: 100%;
+      }
+      .controls input[type="number"] {
+        background: #05070e;
+        color: var(--text);
+        border: 1px solid #334155;
+        border-radius: 4px;
+        padding: 3px;
+        font-family: inherit;
+      }
+      .controls label span {
+        color: var(--cyan);
+      }
     </style>
   </head>
   <body>
     <aside id="sidebar">
       <h1><span id="dot" class="dot"></span> CRS Kettling Engine</h1>
+
+      <div class="controls">
+        <div class="btn-row">
+          <button id="btn-play">⏸ Pause</button>
+          <button id="btn-restart">↻ Relancer</button>
+          <button id="btn-stop">⏹ Stop</button>
+        </div>
+        <label>Manifestants <span id="lbl-prot">6000</span>
+          <input type="range" id="sl-prot" min="500" max="12000" step="500" value="6000" />
+        </label>
+        <label>CRS <span id="lbl-cops">160</span>
+          <input type="range" id="sl-cops" min="20" max="600" step="10" value="160" />
+        </label>
+        <label>Agressivité CRS <span id="lbl-aggr">1.0</span>
+          <input type="range" id="sl-aggr" min="0.5" max="3" step="0.1" value="1" />
+        </label>
+        <label>Seed
+          <input type="number" id="in-seed" value="42" />
+        </label>
+      </div>
 
       <div class="card">
         <div class="label">Seed Déterministe</div>
@@ -281,6 +351,41 @@
       ws.onopen = () => dot.classList.add("on");
       ws.onclose = () => dot.classList.remove("on");
 
+      // --- Contrôles de simulation ---
+      const send = (obj) => {
+        if (ws.readyState === 1) ws.send(JSON.stringify(obj));
+      };
+      const slProt = el("sl-prot"),
+        slCops = el("sl-cops"),
+        slAggr = el("sl-aggr"),
+        inSeed = el("in-seed");
+      const lblProt = el("lbl-prot"),
+        lblCops = el("lbl-cops"),
+        lblAggr = el("lbl-aggr");
+      const btnPlay = el("btn-play"),
+        btnRestart = el("btn-restart"),
+        btnStop = el("btn-stop");
+      let cfgSynced = false,
+        srvPaused = false,
+        srvStopped = false;
+
+      slProt.oninput = () => (lblProt.textContent = slProt.value);
+      slCops.oninput = () => (lblCops.textContent = slCops.value);
+      slAggr.oninput = () =>
+        (lblAggr.textContent = parseFloat(slAggr.value).toFixed(1));
+
+      btnPlay.onclick = () =>
+        send({ cmd: srvPaused || srvStopped ? "play" : "pause" });
+      btnStop.onclick = () => send({ cmd: "stop" });
+      btnRestart.onclick = () =>
+        send({
+          cmd: "restart",
+          seed: parseInt(inSeed.value, 10) || 0,
+          protesters: parseInt(slProt.value, 10),
+          cops: parseInt(slCops.value, 10),
+          aggr: parseFloat(slAggr.value),
+        });
+
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -294,6 +399,24 @@
           gridCols = data.grid_cols;
           gridRows = data.grid_rows;
           worldSize = data.world_size;
+
+          const c = data.config;
+          if (c) {
+            if (!cfgSynced) {
+              slProt.value = c.protesters;
+              lblProt.textContent = c.protesters;
+              slCops.value = c.cops;
+              lblCops.textContent = c.cops;
+              slAggr.value = c.aggr;
+              lblAggr.textContent = c.aggr.toFixed(1);
+              inSeed.value = c.seed;
+              cfgSynced = true;
+            }
+            srvPaused = c.paused;
+            srvStopped = c.stopped;
+            btnPlay.textContent =
+              c.paused || c.stopped ? "▶ Reprendre" : "⏸ Pause";
+          }
 
           const s = data.stats;
           elSeed.textContent = s.seed;

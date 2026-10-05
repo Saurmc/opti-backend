@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 
 	"golang.org/x/net/websocket"
@@ -162,8 +163,18 @@ type Stats struct {
 	IsFinished bool    `json:"is_finished"`
 }
 
+type ConfigEcho struct {
+	Seed       int64   `json:"seed"`
+	Protesters int     `json:"protesters"`
+	Cops       int     `json:"cops"`
+	Aggr       float64 `json:"aggr"`
+	Paused     bool    `json:"paused"`
+	Stopped    bool    `json:"stopped"`
+}
+
 type FramePayload struct {
 	TPS        int        `json:"tps"`
+	Config     ConfigEcho `json:"config"`
 	WorldSize  float64    `json:"world_size"`
 	GridCols   int        `json:"grid_cols"`
 	GridRows   int        `json:"grid_rows"`
@@ -187,7 +198,25 @@ var (
 	sealedRects []Rect
 	passed      int
 	arrested    int
+
+	// Contrôle de simulation.
+	simMu   sync.Mutex
+	cfg     SimConfig
+	paused  bool
+	stopped bool
 )
+
+// SimConfig : paramètres pilotables appliqués au (re)démarrage.
+type SimConfig struct {
+	Seed       int64
+	Protesters int
+	Cops       int
+	Aggr       float64 // agressivité CRS (0.5..2.0)
+}
+
+func defaultConfig() SimConfig {
+	return SimConfig{Seed: MasterSeed, Protesters: TotalProtesters, Cops: TotalCops, Aggr: 1.0}
+}
 
 func collides(x, y float64) bool {
 	if x <= 20 || x >= WorldSize-20 || y <= 20 || y >= WorldSize-20 {
@@ -246,8 +275,20 @@ func stepAround(x, y, dirx, diry, speed float64) (float64, float64, bool) {
 	return x, y, false
 }
 
-func initSimulation(seed int64) {
-	simRng = rand.New(rand.NewSource(seed))
+func initSimulation(c SimConfig) {
+	if c.Protesters < 1 {
+		c.Protesters = 1
+	}
+	if c.Cops < 2 {
+		c.Cops = 2
+	}
+	if c.Aggr <= 0 {
+		c.Aggr = 1.0
+	}
+	cfg = c
+	paused = false
+	stopped = false
+	simRng = rand.New(rand.NewSource(c.Seed))
 	passed = 0
 	arrested = 0
 	gases = nil
@@ -272,8 +313,8 @@ func initSimulation(seed int64) {
 	}
 
 	// Manifestants : foule dense en bas.
-	protesters = make([]Protester, TotalProtesters)
-	for i := 0; i < TotalProtesters; i++ {
+	protesters = make([]Protester, c.Protesters)
+	for i := 0; i < c.Protesters; i++ {
 		var x, y float64
 		for {
 			x = 350.0 + simRng.Float64()*(WorldSize-700.0)
@@ -300,9 +341,9 @@ func initSimulation(seed int64) {
 	}
 
 	// CRS : cordon initial en travers de l'avenue.
-	cops = make([]Cop, TotalCops)
-	for i := 0; i < TotalCops; i++ {
-		x := 400.0 + (WorldSize-800.0)*float64(i)/float64(TotalCops-1)
+	cops = make([]Cop, c.Cops)
+	for i := 0; i < c.Cops; i++ {
+		x := 400.0 + (WorldSize-800.0)*float64(i)/float64(c.Cops-1)
 		y := CordonY + (simRng.Float64()-0.5)*120.0
 		x, y = findFreeSpot(x, y)
 		cops[i] = Cop{
@@ -363,6 +404,17 @@ func initSimulation(seed int64) {
 }
 
 func updateSimulation() {
+	aggr := cfg.Aggr
+	if aggr <= 0 {
+		aggr = 1.0
+	}
+	arrestChance := ArrestChance * aggr
+	kettleChance := KettleArrestChance * aggr
+	gasThresh := int(float64(GasThrowThreshold) / aggr)
+	if gasThresh < 1 {
+		gasThresh = 1
+	}
+
 	// Pré-passe : centre de gravité de la foule active + indices des meneurs.
 	var sumX, sumY, activeCount float64
 	leaderIdx := make([]int, 0, int(LeaderRatio*float64(TotalProtesters))+1)
@@ -445,7 +497,7 @@ func updateSimulation() {
 		// Condition d'interpellation : contact + (nasse OU gazé OU épuisé OU à bout de souffle).
 		if nearestCopD < ArrestRadius {
 			if encircle >= EncircleCops || inGas || p.IsExhausted || p.Stamina < 25 {
-				if simRng.Float64() < ArrestChance {
+				if simRng.Float64() < arrestChance {
 					p.Arrested = true
 					arrested++
 					continue
@@ -590,7 +642,7 @@ func updateSimulation() {
 		}
 
 		// Lacrymo : densité trop forte devant => tir vers la foule.
-		if c.GasCd == 0 && senseCount >= GasThrowThreshold && len(gases) < MaxGases {
+		if c.GasCd == 0 && senseCount >= gasThresh && len(gases) < MaxGases {
 			var dirx, diry float64
 			if targetFront != nil {
 				dirx, diry = targetFront.X-c.X, targetFront.Y-c.Y
@@ -705,7 +757,7 @@ func updateSimulation() {
 				continue
 			}
 			if p.X >= seg.X0 && p.X <= seg.X1 && p.Y >= seg.Y0 && p.Y <= seg.Y1 {
-				if simRng.Float64() < KettleArrestChance {
+				if simRng.Float64() < kettleChance {
 					p.Arrested = true
 					arrested++
 				}
@@ -772,10 +824,47 @@ func getCounts() (active, panicked, exhausted, leaders, civils int) {
 	return
 }
 
+type controlMsg struct {
+	Cmd        string  `json:"cmd"`
+	Seed       int64   `json:"seed"`
+	Protesters int     `json:"protesters"`
+	Cops       int     `json:"cops"`
+	Aggr       float64 `json:"aggr"`
+}
+
 func wsHandler(ws *websocket.Conn) {
 	defer ws.Close()
 
-	initSimulation(MasterSeed)
+	simMu.Lock()
+	initSimulation(defaultConfig())
+	simMu.Unlock()
+
+	// Goroutine de contrôle : lit les commandes du client (play/pause/restart/stop).
+	go func() {
+		for {
+			var raw string
+			if err := websocket.Message.Receive(ws, &raw); err != nil {
+				return
+			}
+			var m controlMsg
+			if err := json.Unmarshal([]byte(raw), &m); err != nil {
+				continue
+			}
+			simMu.Lock()
+			switch m.Cmd {
+			case "pause":
+				paused = true
+			case "play":
+				paused = false
+				stopped = false
+			case "stop":
+				stopped = true
+			case "restart":
+				initSimulation(SimConfig{Seed: m.Seed, Protesters: m.Protesters, Cops: m.Cops, Aggr: m.Aggr})
+			}
+			simMu.Unlock()
+		}
+	}()
 
 	ticker := time.NewTicker(time.Second / time.Duration(TargetFPS))
 	defer ticker.Stop()
@@ -785,9 +874,12 @@ func wsHandler(ws *websocket.Conn) {
 	currentTPS := 0
 
 	for range ticker.C {
-		updateSimulation()
+		simMu.Lock()
 
-		frames++
+		if !paused && !stopped {
+			updateSimulation()
+			frames++
+		}
 		if time.Since(lastCheck) >= time.Second {
 			currentTPS = frames
 			frames = 0
@@ -829,12 +921,20 @@ func wsHandler(ws *websocket.Conn) {
 		}
 
 		payload := FramePayload{
-			TPS:       currentTPS,
+			TPS: currentTPS,
+			Config: ConfigEcho{
+				Seed:       cfg.Seed,
+				Protesters: cfg.Protesters,
+				Cops:       cfg.Cops,
+				Aggr:       cfg.Aggr,
+				Paused:     paused,
+				Stopped:    stopped,
+			},
 			WorldSize: WorldSize,
 			GridCols:  GridCols,
 			GridRows:  GridRows,
 			Stats: Stats{
-				Seed:       MasterSeed,
+				Seed:       cfg.Seed,
 				Cops:       len(cops),
 				Active:     active,
 				Passed:     passed,
@@ -857,6 +957,8 @@ func wsHandler(ws *websocket.Conn) {
 		}
 
 		data, err := json.Marshal(payload)
+		simMu.Unlock()
+
 		if err != nil {
 			break
 		}
