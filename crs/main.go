@@ -47,6 +47,24 @@ const (
 	CopFallTicks         int16   = 70 // CRS à terre (immobile)
 	CopSlowTicks         int16   = 80 // puis ralenti en se relevant
 
+	// Armes CRS.
+	WaterCannonPer      int     = 40 // 1 canon pour N CRS
+	WaterCannonMin      int     = 2
+	WaterCannonRange    float64 = 750.0
+	WaterCannonSpread   float64 = 0.5 // demi-angle du cône (rad)
+	WaterCannonPush     float64 = 42.0
+	WaterWetTicks       int16   = 60 // ralenti après aspersion
+	WaterWetSlow        float64 = 0.5
+	UmbrellaWaterFactor float64 = 0.35 // le parapluie amortit le jet
+
+	LBDCopRatio        float64 = 0.15
+	LBDCooldown        int16   = 150
+	LBDRange           float64 = 900.0
+	LBDRadius          float64 = 170.0 // rayon de séparation à l'impact
+	LBDPush            float64 = 48.0
+	LBDKillChance      float64 = 0.05
+	UmbrellaKillFactor float64 = 0.2 // le parapluie réduit la létalité
+
 	// Géographie de la manif : objectif en haut, départ de la foule en bas, cordon CRS au milieu.
 	ObjectiveY float64 = 450.0  // un manifestant qui atteint Y <= ObjectiveY a "passé"
 	SpawnMinY  float64 = 3300.0 // bande de départ de la foule
@@ -76,10 +94,10 @@ const (
 	GasSlowFactor     float64 = 0.45 // ralentissement dans le nuage
 
 	// Grenade de désencerclement (impulsion)
-	BlastRadius      float64 = 220.0
-	BlastPush        float64 = 60.0
-	BlastCooldown    int16   = 120
-	PanicDuration    int16   = 90
+	BlastRadius   float64 = 220.0
+	BlastPush     float64 = 60.0
+	BlastCooldown int16   = 120
+	PanicDuration int16   = 90
 
 	// Endurance
 	MaxStamina     int16 = 100
@@ -108,6 +126,7 @@ type Protester struct {
 	Stamina       int16
 	PanicTimer    int16
 	CounterCd     int16 // cooldown contre-lacrymo
+	WetTimer      int16 // aspergé par le canon à eau (ralenti)
 	X, Y          float64
 	Speed         float64
 	Determination float64 // 0..1 : volonté d'avancer vers l'objectif
@@ -123,6 +142,14 @@ type Cop struct {
 	BlastCd   int16
 	FallTimer int16 // à terre (fil tendu)
 	SlowTimer int16 // ralenti après s'être relevé
+	HasLBD    bool  // équipé d'un lanceur LBD
+	LBDCd     int16 // cooldown LBD
+}
+
+// WaterCannon : camion à eau fixe projetant un jet en cône.
+type WaterCannon struct {
+	X, Y float64
+	Ang  float64 // direction du jet
 }
 
 // Tripwire : fil tendu par les manifestants, fait tomber les CRS.
@@ -167,6 +194,12 @@ type GPoint struct {
 	R int16 `json:"r"`
 }
 
+type CannonPoint struct {
+	X int16   `json:"x"`
+	Y int16   `json:"y"`
+	A float64 `json:"a"` // angle du jet
+}
+
 type Rect struct {
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
@@ -180,6 +213,7 @@ type Stats struct {
 	Active     int     `json:"active"`
 	Passed     int     `json:"passed"`
 	Arrested   int     `json:"arrested"`
+	Killed     int     `json:"killed"`
 	Panicked   int     `json:"panicked"`
 	Exhausted  int     `json:"exhausted"`
 	Leaders    int     `json:"leaders"`
@@ -203,33 +237,36 @@ type ConfigEcho struct {
 }
 
 type FramePayload struct {
-	TPS        int        `json:"tps"`
-	Config     ConfigEcho `json:"config"`
-	WorldSize  float64    `json:"world_size"`
-	GridCols   int        `json:"grid_cols"`
-	GridRows   int        `json:"grid_rows"`
-	Stats      Stats      `json:"stats"`
-	Obstacles  []Obstacle `json:"obstacles"`
-	Objective  Rect       `json:"objective"`
-	Kettles    []Rect     `json:"kettles"`
-	Tripwires  []CPoint   `json:"tripwires"`
-	Gases      []GPoint   `json:"gases"`
-	Protesters []PPoint   `json:"protesters"`
-	Cops       []CPoint   `json:"cops"`
-	Heatmap    []int      `json:"heatmap"`
+	TPS        int           `json:"tps"`
+	Config     ConfigEcho    `json:"config"`
+	WorldSize  float64       `json:"world_size"`
+	GridCols   int           `json:"grid_cols"`
+	GridRows   int           `json:"grid_rows"`
+	Stats      Stats         `json:"stats"`
+	Obstacles  []Obstacle    `json:"obstacles"`
+	Objective  Rect          `json:"objective"`
+	Kettles    []Rect        `json:"kettles"`
+	Tripwires  []CPoint      `json:"tripwires"`
+	Cannons    []CannonPoint `json:"cannons"`
+	Gases      []GPoint      `json:"gases"`
+	Protesters []PPoint      `json:"protesters"`
+	Cops       []CPoint      `json:"cops"`
+	Heatmap    []int         `json:"heatmap"`
 }
 
 var (
-	simRng     *rand.Rand
-	protesters []Protester
-	cops       []Cop
-	obstacles   []Obstacle
-	gases       []Gas
-	tripwires   []Tripwire
-	segments    []Segment
-	sealedRects []Rect
-	passed      int
-	arrested    int
+	simRng       *rand.Rand
+	protesters   []Protester
+	cops         []Cop
+	obstacles    []Obstacle
+	gases        []Gas
+	tripwires    []Tripwire
+	waterCannons []WaterCannon
+	segments     []Segment
+	sealedRects  []Rect
+	passed       int
+	arrested     int
+	killed       int
 
 	// Contrôle de simulation.
 	simMu   sync.Mutex
@@ -323,8 +360,10 @@ func initSimulation(c SimConfig) {
 	simRng = rand.New(rand.NewSource(c.Seed))
 	passed = 0
 	arrested = 0
+	killed = 0
 	gases = nil
 	tripwires = nil
+	waterCannons = nil
 
 	// Trame de rues : immeubles réguliers séparés par des rues. L'objectif (haut)
 	// et l'avenue centrale restent dégagés. Les angles d'immeubles bordent les rues,
@@ -387,7 +426,21 @@ func initSimulation(c SimConfig) {
 			Y:         y,
 			Speed:     2.5 + simRng.Float64()*0.4,
 			WanderAng: simRng.Float64() * 2 * math.Pi,
+			HasLBD:    simRng.Float64() < LBDCopRatio,
 		}
+	}
+
+	// Canons à eau : camions fixes répartis sur la ligne du cordon.
+	nCannons := c.Cops / WaterCannonPer
+	if nCannons < WaterCannonMin {
+		nCannons = WaterCannonMin
+	}
+	waterCannons = make([]WaterCannon, nCannons)
+	for i := 0; i < nCannons; i++ {
+		cx := 500.0 + (WorldSize-1000.0)*float64(i)/(float64(nCannons-1)+1e-9)
+		cy := CordonY - 120.0
+		cx, cy = findFreeSpot(cx, cy)
+		waterCannons[i] = WaterCannon{X: cx, Y: cy, Ang: math.Pi / 2}
 	}
 
 	// Pré-calcul des segments de rue (corridors + intersections) pour la nasse.
@@ -488,6 +541,9 @@ func updateSimulation() {
 		}
 		if p.CounterCd > 0 {
 			p.CounterCd--
+		}
+		if p.WetTimer > 0 {
+			p.WetTimer--
 		}
 
 		// Nuages de gaz : répulsion + panique + ralentissement.
@@ -655,6 +711,9 @@ func updateSimulation() {
 		if inGas {
 			sp *= GasSlowFactor
 		}
+		if p.WetTimer > 0 {
+			sp *= WaterWetSlow
+		}
 
 		dx, dy := capVec(fx, fy, sp)
 		nx := p.X + dx
@@ -792,6 +851,49 @@ func updateSimulation() {
 			c.BlastCd = BlastCooldown
 		}
 
+		// LBD : sépare la foule autour de l'impact et peut blesser mortellement.
+		if c.HasLBD {
+			if c.LBDCd > 0 {
+				c.LBDCd--
+			}
+			if c.LBDCd == 0 && targetFront != nil && frontD2 < LBDRange*LBDRange {
+				impactX, impactY := targetFront.X, targetFront.Y
+				kc := LBDKillChance
+				if targetFront.Umbrella {
+					kc *= UmbrellaKillFactor
+				}
+				if simRng.Float64() < kc {
+					targetFront.Arrested = true
+					killed++
+				}
+				for j := range protesters {
+					p := &protesters[j]
+					if p.Arrested || p.Passed {
+						continue
+					}
+					dx := p.X - impactX
+					dy := p.Y - impactY
+					d := math.Hypot(dx, dy)
+					if d < LBDRadius && d > 1e-6 {
+						push := (LBDRadius - d) / LBDRadius * LBDPush
+						if p.Umbrella {
+							push *= UmbrellaWaterFactor
+						}
+						pnx := p.X + dx/d*push
+						pny := p.Y + dy/d*push
+						if !collides(pnx, p.Y) {
+							p.X = pnx
+						}
+						if !collides(p.X, pny) {
+							p.Y = pny
+						}
+						p.PanicTimer = PanicDuration
+					}
+				}
+				c.LBDCd = LBDCooldown
+			}
+		}
+
 		// Déplacement : intercepter en priorité le manifestant le plus avancé proche.
 		target := targetFront
 		speedFactor := 1.0
@@ -866,6 +968,45 @@ func updateSimulation() {
 					arrested++
 				}
 			}
+		}
+	}
+
+	// 2c. Canons à eau : jet en cône, fort recul + ralentissement (amorti par le parapluie).
+	for wi := range waterCannons {
+		wc := &waterCannons[wi]
+		wc.Ang = math.Atan2(crowdY-wc.Y, crowdX-wc.X)
+		for pi := range protesters {
+			p := &protesters[pi]
+			if p.Arrested || p.Passed {
+				continue
+			}
+			dx := p.X - wc.X
+			dy := p.Y - wc.Y
+			d := math.Hypot(dx, dy)
+			if d > WaterCannonRange || d < 1e-6 {
+				continue
+			}
+			ang := math.Atan2(dy, dx)
+			da := math.Abs(math.Atan2(math.Sin(ang-wc.Ang), math.Cos(ang-wc.Ang)))
+			if da > WaterCannonSpread {
+				continue
+			}
+			push := (1 - d/WaterCannonRange) * WaterCannonPush
+			wet := WaterWetTicks
+			if p.Umbrella {
+				push *= UmbrellaWaterFactor
+				wet = WaterWetTicks / 2
+			}
+			pnx := p.X + dx/d*push
+			pny := p.Y + dy/d*push
+			if !collides(pnx, p.Y) {
+				p.X = pnx
+			}
+			if !collides(p.X, pny) {
+				p.Y = pny
+			}
+			p.WetTimer = wet
+			p.PanicTimer = PanicDuration
 		}
 	}
 
@@ -1041,12 +1182,17 @@ func wsHandler(ws *websocket.Conn) {
 			twPoints[i] = CPoint{X: int16(tripwires[i].X), Y: int16(tripwires[i].Y)}
 		}
 
+		caPoints := make([]CannonPoint, len(waterCannons))
+		for i := range waterCannons {
+			caPoints[i] = CannonPoint{X: int16(waterCannons[i].X), Y: int16(waterCannons[i].Y), A: waterCannons[i].Ang}
+		}
+
 		gPoints := make([]GPoint, len(gases))
 		for i := range gases {
 			gPoints[i] = GPoint{X: int16(gases[i].X), Y: int16(gases[i].Y), R: int16(gases[i].R)}
 		}
 
-		resolved := passed + arrested
+		resolved := passed + arrested + killed
 		rate := 0.0
 		if resolved > 0 {
 			rate = (float64(passed) / float64(resolved)) * 100.0
@@ -1071,6 +1217,7 @@ func wsHandler(ws *websocket.Conn) {
 				Active:     active,
 				Passed:     passed,
 				Arrested:   arrested,
+				Killed:     killed,
 				Panicked:   panicked,
 				Exhausted:  exhausted,
 				Leaders:    leaders,
@@ -1087,6 +1234,7 @@ func wsHandler(ws *websocket.Conn) {
 			Objective:  Rect{X: 0, Y: 0, W: WorldSize, H: ObjectiveY},
 			Kettles:    sealedRects,
 			Tripwires:  twPoints,
+			Cannons:    caPoints,
 			Gases:      gPoints,
 			Protesters: pPoints,
 			Cops:       cPoints,

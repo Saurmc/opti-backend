@@ -283,6 +283,11 @@
         </div>
       </div>
 
+      <div class="card">
+        <div class="label">Victimes (tir LBD)</div>
+        <div class="val" id="val-killed" style="color: var(--red)">0</div>
+      </div>
+
       <div class="legend-box">
         <div class="legend-title">Légende Tactique</div>
         <div class="legend-item">
@@ -304,6 +309,10 @@
         <div class="legend-item">
           <div class="legend-icon" style="background: #a3e635; height: 3px"></div>
           Fil tendu
+        </div>
+        <div class="legend-item">
+          <div class="legend-icon" style="background: rgba(96, 165, 250, 0.4); border: 1px solid #1d4ed8"></div>
+          Canon à eau (jet)
         </div>
         <div class="legend-item">
           <div class="legend-circle" style="background: #fff; box-shadow: 0 0 6px #fff"></div>
@@ -361,7 +370,8 @@
         elGoggles = el("val-goggles"),
         elUmbrellas = el("val-umbrellas"),
         elTripwires = el("val-tripwires"),
-        elCopsDown = el("val-copsdown");
+        elCopsDown = el("val-copsdown"),
+        elKilled = el("val-killed");
 
       let heatmap = [],
         protesters = [],
@@ -369,6 +379,7 @@
         gases = [],
         kettles = [],
         tripwires = [],
+        cannons = [],
         obstacles = [],
         objective = null;
       let gridCols = 100,
@@ -432,6 +443,7 @@
           gases = data.gases || [];
           kettles = data.kettles || [];
           tripwires = data.tripwires || [];
+          cannons = data.cannons || [];
           obstacles = data.obstacles || [];
           objective = data.objective || null;
           gridCols = data.grid_cols;
@@ -472,6 +484,7 @@
           elUmbrellas.textContent = s.umbrellas;
           elTripwires.textContent = s.tripwires;
           elCopsDown.textContent = s.cops_down;
+          elKilled.textContent = s.killed;
         } catch (e) {
           console.error(e);
         }
@@ -561,6 +574,22 @@
           ctx.beginPath();
           ctx.arc(cx, cy, cr, 0, 2 * Math.PI);
           ctx.fill();
+        }
+
+        // 4b. Canons à eau (jet en cône + camion)
+        for (const cn of cannons) {
+          const x = cn.x * scale,
+            y = cn.y * scale,
+            len = 750 * scale,
+            sp = 0.5;
+          ctx.fillStyle = "rgba(96, 165, 250, 0.18)";
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.arc(x, y, len, cn.a - sp, cn.a + sp);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = "#1d4ed8";
+          ctx.fillRect(x - 3, y - 3, 6, 6);
         }
 
         // 5. Manifestants — taille = meneur, couleur = état/équipement
