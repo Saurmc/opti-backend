@@ -48,6 +48,14 @@ const (
 	CopFallTicks         int16   = 70 // CRS à terre (immobile)
 	CopSlowTicks         int16   = 80 // puis ralenti en se relevant
 
+	// Interactions de foule (type boids) — implémentation naïve O(n²) : chaque
+	// manifestant est comparé à TOUS les autres. Hot path vedette à optimiser
+	// ensuite (grille spatiale -> O(n)).
+	SeparationRadius float64 = 40.0  // répulsion des voisins très proches
+	CohesionRadius   float64 = 130.0 // attraction vers le centre local
+	SeparationWeight float64 = 0.7
+	CohesionWeight   float64 = 0.25
+
 	// Navigation (flow field vers l'objectif, contournement des rues gazées).
 	NavN       int = 100 // résolution de la grille de navigation
 	NavRecalc  int = 15 // recalcul du champ tous les N ticks
@@ -1030,6 +1038,43 @@ func updateSimulation() {
 					fx += (lx - p.X) / d * 0.4
 					fy += (ly - p.Y) / d * 0.4
 				}
+			}
+		}
+
+		// Interactions de foule (séparation + cohésion) — NAÏF O(n²) : on parcourt
+		// TOUS les autres manifestants. Hot path vedette de l'audit.
+		var sepX, sepY, cohX, cohY float64
+		cohCount := 0
+		sepR2 := SeparationRadius * SeparationRadius
+		cohR2 := CohesionRadius * CohesionRadius
+		for j := range protesters {
+			o := &protesters[j]
+			if j == i || o.Arrested || o.Passed {
+				continue
+			}
+			dx := p.X - o.X
+			dy := p.Y - o.Y
+			d2 := dx*dx + dy*dy
+			if d2 < sepR2 && d2 > 1e-6 {
+				d := math.Sqrt(d2)
+				sepX += dx / d // s'éloigner du voisin proche
+				sepY += dy / d
+			}
+			if d2 < cohR2 {
+				cohX += o.X // accumuler pour le centre local
+				cohY += o.Y
+				cohCount++
+			}
+		}
+		fx += sepX * SeparationWeight
+		fy += sepY * SeparationWeight
+		if cohCount > 0 {
+			cx := cohX/float64(cohCount) - p.X
+			cy := cohY/float64(cohCount) - p.Y
+			cl := math.Hypot(cx, cy)
+			if cl > 1e-6 {
+				fx += cx / cl * CohesionWeight
+				fy += cy / cl * CohesionWeight
 			}
 		}
 
