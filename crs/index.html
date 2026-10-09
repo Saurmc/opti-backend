@@ -499,6 +499,7 @@
       }
 
       const ws = new WebSocket("ws://" + window.location.host + "/ws");
+      ws.binaryType = "arraybuffer";
       ws.onopen = () => dot.classList.add("on");
       ws.onclose = () => dot.classList.remove("on");
 
@@ -573,9 +574,88 @@
           pave_hit: parseInt(slPavHit.value, 10) / 100,
         });
 
+      // Décodage de la frame binaire : [uint32 jsonLen][en-tête JSON][blob].
+      function decodeFrame(buf) {
+        const dv = new DataView(buf);
+        let off = 0;
+        const jsonLen = dv.getUint32(off, true);
+        off += 4;
+        const data = JSON.parse(
+          new TextDecoder().decode(new Uint8Array(buf, off, jsonLen)),
+        );
+        off += jsonLen;
+        // Manifestants : 5 o (int16 x, int16 y, uint8 drapeaux).
+        let n = dv.getUint32(off, true);
+        off += 4;
+        const prot = new Array(n);
+        for (let i = 0; i < n; i++) {
+          const x = dv.getInt16(off, true);
+          const y = dv.getInt16(off + 2, true);
+          const f = dv.getUint8(off + 4);
+          off += 5;
+          prot[i] = {
+            x,
+            y,
+            l: !!(f & 1),
+            p: !!(f & 2),
+            e: !!(f & 4),
+            g: !!(f & 8),
+            u: !!(f & 16),
+          };
+        }
+        data.protesters = prot;
+        // CRS : 4 o.
+        n = dv.getUint32(off, true);
+        off += 4;
+        const cps = new Array(n);
+        for (let i = 0; i < n; i++) {
+          cps[i] = { x: dv.getInt16(off, true), y: dv.getInt16(off + 2, true) };
+          off += 4;
+        }
+        data.cops = cps;
+        // Gaz : 7 o.
+        n = dv.getUint32(off, true);
+        off += 4;
+        const gs = new Array(n);
+        for (let i = 0; i < n; i++) {
+          gs[i] = {
+            x: dv.getInt16(off, true),
+            y: dv.getInt16(off + 2, true),
+            r: dv.getInt16(off + 4, true),
+            b: !!dv.getUint8(off + 6),
+          };
+          off += 7;
+        }
+        data.gases = gs;
+        // Tirs : 10 o.
+        n = dv.getUint32(off, true);
+        off += 4;
+        const sh = new Array(n);
+        for (let i = 0; i < n; i++) {
+          sh[i] = {
+            x0: dv.getInt16(off, true),
+            y0: dv.getInt16(off + 2, true),
+            x1: dv.getInt16(off + 4, true),
+            y1: dv.getInt16(off + 6, true),
+            k: dv.getUint8(off + 8),
+            a: dv.getUint8(off + 9),
+          };
+          off += 10;
+        }
+        data.shots = sh;
+        // Heatmap : 1 o/cellule.
+        n = dv.getUint32(off, true);
+        off += 4;
+        data.heatmap = new Uint8Array(buf, off, n);
+        return data;
+      }
+
       ws.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data);
+          const data =
+            typeof event.data === "string"
+              ? JSON.parse(event.data)
+              : decodeFrame(event.data);
           heatmap = data.heatmap || [];
           protesters = data.protesters || [];
           cops = data.cops || [];

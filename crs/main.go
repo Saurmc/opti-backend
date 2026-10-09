@@ -2,6 +2,7 @@ package main
 
 import (
 	"container/heap"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -63,8 +64,8 @@ const (
 
 	// Navigation (flow field vers l'objectif, contournement des rues gazées).
 	NavN       int = 100 // résolution de la grille de navigation
-	NavRecalc  int = 15 // recalcul du champ tous les N ticks
-	NavGasCost int = 12 // pénalité d'une cellule gazée
+	NavRecalc  int = 15  // recalcul du champ tous les N ticks
+	NavGasCost int = 12  // pénalité d'une cellule gazée
 
 	// Armes CRS.
 	WaterCannonPer      int     = 40 // 1 canon pour N CRS
@@ -163,14 +164,14 @@ type Protester struct {
 }
 
 type Cop struct {
-	ID        int64
-	X, Y      float64
-	Speed     float64
-	WanderAng float64
-	GasCd     int16
-	BlastCd   int16
-	FallTimer int16 // à terre (fil tendu)
-	SlowTimer int16 // ralenti après s'être relevé
+	ID         int64
+	X, Y       float64
+	Speed      float64
+	WanderAng  float64
+	GasCd      int16
+	BlastCd    int16
+	FallTimer  int16 // à terre (fil tendu)
+	SlowTimer  int16 // ralenti après s'être relevé
 	HasLBD     bool  // équipé d'un lanceur LBD
 	LBDCd      int16 // cooldown LBD
 	Eliminated bool  // mis hors de combat (pavé)
@@ -295,6 +296,22 @@ type ConfigEcho struct {
 	Stopped       bool    `json:"stopped"`
 }
 
+// FrameHeader = partie JSON de la frame binaire (petit volume / statique).
+// Le gros volume (manifestants, CRS, gaz, tirs, heatmap) suit en binaire.
+type FrameHeader struct {
+	TPS       int           `json:"tps"`
+	Config    ConfigEcho    `json:"config"`
+	WorldSize float64       `json:"world_size"`
+	GridCols  int           `json:"grid_cols"`
+	GridRows  int           `json:"grid_rows"`
+	Stats     Stats         `json:"stats"`
+	Obstacles []Obstacle    `json:"obstacles"`
+	Objective Rect          `json:"objective"`
+	Kettles   []Rect        `json:"kettles"`
+	Tripwires []CPoint      `json:"tripwires"`
+	Cannons   []CannonPoint `json:"cannons"`
+}
+
 type FramePayload struct {
 	TPS        int           `json:"tps"`
 	Config     ConfigEcho    `json:"config"`
@@ -315,10 +332,10 @@ type FramePayload struct {
 }
 
 var (
-	simRng       *rand.Rand
-	protesters   []Protester
-	cops         []Cop
-	obstacles    []Obstacle
+	simRng         *rand.Rand
+	protesters     []Protester
+	cops           []Cop
+	obstacles      []Obstacle
 	gases          []Gas
 	tripwires      []Tripwire
 	waterCannons   []WaterCannon
@@ -1600,6 +1617,9 @@ func updateSimulation() {
 	}
 }
 
+// frameBuf : buffer binaire réutilisé entre les frames (zéro alloc récurrente).
+var frameBuf []byte
+
 func generateHeatmap() []int {
 	grid := make([]int, GridCols*GridRows)
 	cellW := WorldSize / float64(GridCols)
@@ -1734,45 +1754,92 @@ func wsHandler(ws *websocket.Conn) {
 		active, panicked, exhausted, leaders, civils, goggles, umbrellas := getCounts()
 		isFinished := (active == 0)
 
-		pPoints := make([]PPoint, 0, active)
+		// --- Blob binaire : le gros volume écrit directement dans frameBuf (zéro
+		// slice intermédiaire). Little-endian partout, positions quantifiées en int16. ---
+		le := binary.LittleEndian
+		blob := frameBuf[:0]
+
+		// Manifestants : 5 octets (int16 x, int16 y, uint8 drapeaux).
+		blob = le.AppendUint32(blob, uint32(active))
 		for i := range protesters {
 			p := &protesters[i]
 			if p.Arrested || p.Passed {
 				continue
 			}
-			pPoints = append(pPoints, PPoint{
-				X: int16(p.X),
-				Y: int16(p.Y),
-				L: p.IsLeader,
-				P: p.IsPanicked,
-				E: p.IsExhausted,
-				G: p.Goggles,
-				U: p.Umbrella,
-			})
+			blob = le.AppendUint16(blob, uint16(int16(p.X)))
+			blob = le.AppendUint16(blob, uint16(int16(p.Y)))
+			var f byte
+			if p.IsLeader {
+				f |= 1
+			}
+			if p.IsPanicked {
+				f |= 2
+			}
+			if p.IsExhausted {
+				f |= 4
+			}
+			if p.Goggles {
+				f |= 8
+			}
+			if p.Umbrella {
+				f |= 16
+			}
+			blob = append(blob, f)
 		}
 
+		// CRS : 4 octets (int16 x, int16 y). Comptage actifs + à terre au passage.
 		copsDown := 0
-		cPoints := make([]CPoint, 0, len(cops))
+		activeCops := 0
+		copCountPos := len(blob)
+		blob = le.AppendUint32(blob, 0) // emplacement du compte, rempli après
 		for i := range cops {
 			if cops[i].Eliminated {
 				continue
 			}
-			cPoints = append(cPoints, CPoint{X: int16(cops[i].X), Y: int16(cops[i].Y)})
+			blob = le.AppendUint16(blob, uint16(int16(cops[i].X)))
+			blob = le.AppendUint16(blob, uint16(int16(cops[i].Y)))
+			activeCops++
 			if cops[i].FallTimer > 0 {
 				copsDown++
 			}
 		}
-		activeCops := len(cPoints)
+		le.PutUint32(blob[copCountPos:], uint32(activeCops))
 
-		shotPoints := make([]ShotPoint, len(shots))
-		for i := range shots {
-			shotPoints[i] = ShotPoint{
-				X0: int16(shots[i].X0), Y0: int16(shots[i].Y0),
-				X1: int16(shots[i].X1), Y1: int16(shots[i].Y1),
-				K: int8(shots[i].Kind), A: int8(shots[i].Age),
+		// Gaz : 7 octets (int16 x, y, r, uint8 bleu).
+		blob = le.AppendUint32(blob, uint32(len(gases)))
+		for i := range gases {
+			blob = le.AppendUint16(blob, uint16(int16(gases[i].X)))
+			blob = le.AppendUint16(blob, uint16(int16(gases[i].Y)))
+			blob = le.AppendUint16(blob, uint16(int16(gases[i].R)))
+			var b byte
+			if gases[i].Thrown {
+				b = 1
 			}
+			blob = append(blob, b)
 		}
 
+		// Tirs : 10 octets (int16 x0, y0, x1, y1, uint8 kind, uint8 age).
+		blob = le.AppendUint32(blob, uint32(len(shots)))
+		for i := range shots {
+			blob = le.AppendUint16(blob, uint16(int16(shots[i].X0)))
+			blob = le.AppendUint16(blob, uint16(int16(shots[i].Y0)))
+			blob = le.AppendUint16(blob, uint16(int16(shots[i].X1)))
+			blob = le.AppendUint16(blob, uint16(int16(shots[i].Y1)))
+			blob = append(blob, byte(shots[i].Kind), byte(shots[i].Age))
+		}
+
+		// Heatmap : 1 octet/cellule (compte brut plafonné à 255 au lieu d'un int JSON).
+		heat := generateHeatmap()
+		blob = le.AppendUint32(blob, uint32(len(heat)))
+		for _, v := range heat {
+			if v > 255 {
+				v = 255
+			}
+			blob = append(blob, byte(v))
+		}
+		frameBuf = blob // on garde la capacité pour la frame suivante
+
+		// Petit volume restant → en-tête JSON.
 		twPoints := make([]CPoint, len(tripwires))
 		for i := range tripwires {
 			twPoints[i] = CPoint{X: int16(tripwires[i].X), Y: int16(tripwires[i].Y)}
@@ -1783,18 +1850,13 @@ func wsHandler(ws *websocket.Conn) {
 			caPoints[i] = CannonPoint{X: int16(waterCannons[i].X), Y: int16(waterCannons[i].Y), A: waterCannons[i].Ang}
 		}
 
-		gPoints := make([]GPoint, len(gases))
-		for i := range gases {
-			gPoints[i] = GPoint{X: int16(gases[i].X), Y: int16(gases[i].Y), R: int16(gases[i].R), B: gases[i].Thrown}
-		}
-
 		resolved := passed + arrested + killed
 		rate := 0.0
 		if resolved > 0 {
 			rate = (float64(passed) / float64(resolved)) * 100.0
 		}
 
-		payload := FramePayload{
+		header := FrameHeader{
 			TPS: currentTPS,
 			Config: ConfigEcho{
 				Seed:          cfg.Seed,
@@ -1837,25 +1899,26 @@ func wsHandler(ws *websocket.Conn) {
 				PassRate:   math.Round(rate*10) / 10,
 				IsFinished: isFinished,
 			},
-			Obstacles:  obstacles,
-			Objective:  Rect{X: 0, Y: 0, W: WorldSize, H: ObjectiveY},
-			Kettles:    sealedRects,
-			Tripwires:  twPoints,
-			Cannons:    caPoints,
-			Shots:      shotPoints,
-			Gases:      gPoints,
-			Protesters: pPoints,
-			Cops:       cPoints,
-			Heatmap:    generateHeatmap(),
+			Obstacles: obstacles,
+			Objective: Rect{X: 0, Y: 0, W: WorldSize, H: ObjectiveY},
+			Kettles:   sealedRects,
+			Tripwires: twPoints,
+			Cannons:   caPoints,
 		}
 
-		data, err := json.Marshal(payload)
-		simMu.Unlock()
-
+		jsonBytes, err := json.Marshal(header)
 		if err != nil {
+			simMu.Unlock()
 			break
 		}
-		if err := websocket.Message.Send(ws, string(data)); err != nil {
+		// Frame = [uint32 jsonLen LE][en-tête JSON][blob binaire].
+		frame := make([]byte, 4+len(jsonBytes)+len(blob))
+		le.PutUint32(frame[0:4], uint32(len(jsonBytes)))
+		copy(frame[4:], jsonBytes)
+		copy(frame[4+len(jsonBytes):], blob)
+		simMu.Unlock()
+
+		if err := websocket.Message.Send(ws, frame); err != nil {
 			break
 		}
 	}
