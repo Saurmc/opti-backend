@@ -1713,6 +1713,117 @@ type controlMsg struct {
 	TripwireRate  float64 `json:"tripwire_rate"`
 }
 
+// framePool recycle les buffers de sérialisation du endpoint HTTP (amorti ~0 alloc
+// de blob sous charge). Le chemin WebSocket, lui, réutilise frameBuf.
+var framePool = sync.Pool{New: func() any { b := make([]byte, 0, 256*1024); return &b }}
+
+// httpFrameHandler sérialise l'état courant en frame binaire et l'écrit en réponse.
+// C'est le chemin de sérialisation (axe I/O) mesuré sous charge par Vegeta sur
+// /api/frame. La logique de blob reflète celle du chemin WebSocket (wsHandler).
+func httpFrameHandler(w http.ResponseWriter, r *http.Request) {
+	le := binary.LittleEndian
+	bp := framePool.Get().(*[]byte)
+	blob := (*bp)[:0]
+
+	simMu.Lock()
+	active, panicked, exhausted, leaders, civils, goggles, umbrellas := getCounts()
+
+	// Manifestants (5 o).
+	blob = le.AppendUint32(blob, uint32(active))
+	for i := range protesters {
+		p := &protesters[i]
+		if p.Arrested || p.Passed {
+			continue
+		}
+		blob = le.AppendUint16(blob, uint16(int16(p.X)))
+		blob = le.AppendUint16(blob, uint16(int16(p.Y)))
+		var f byte
+		if p.IsLeader {
+			f |= 1
+		}
+		if p.IsPanicked {
+			f |= 2
+		}
+		if p.IsExhausted {
+			f |= 4
+		}
+		if p.Goggles {
+			f |= 8
+		}
+		if p.Umbrella {
+			f |= 16
+		}
+		blob = append(blob, f)
+	}
+	// CRS (4 o).
+	copsDown, activeCops := 0, 0
+	copCountPos := len(blob)
+	blob = le.AppendUint32(blob, 0)
+	for i := range cops {
+		if cops[i].Eliminated {
+			continue
+		}
+		blob = le.AppendUint16(blob, uint16(int16(cops[i].X)))
+		blob = le.AppendUint16(blob, uint16(int16(cops[i].Y)))
+		activeCops++
+		if cops[i].FallTimer > 0 {
+			copsDown++
+		}
+	}
+	le.PutUint32(blob[copCountPos:], uint32(activeCops))
+	// Gaz (7 o).
+	blob = le.AppendUint32(blob, uint32(len(gases)))
+	for i := range gases {
+		blob = le.AppendUint16(blob, uint16(int16(gases[i].X)))
+		blob = le.AppendUint16(blob, uint16(int16(gases[i].Y)))
+		blob = le.AppendUint16(blob, uint16(int16(gases[i].R)))
+		var b byte
+		if gases[i].Thrown {
+			b = 1
+		}
+		blob = append(blob, b)
+	}
+	// Tirs (10 o).
+	blob = le.AppendUint32(blob, uint32(len(shots)))
+	for i := range shots {
+		blob = le.AppendUint16(blob, uint16(int16(shots[i].X0)))
+		blob = le.AppendUint16(blob, uint16(int16(shots[i].Y0)))
+		blob = le.AppendUint16(blob, uint16(int16(shots[i].X1)))
+		blob = le.AppendUint16(blob, uint16(int16(shots[i].Y1)))
+		blob = append(blob, byte(shots[i].Kind), byte(shots[i].Age))
+	}
+	// Heatmap (1 o/cellule).
+	heat := generateHeatmap()
+	blob = le.AppendUint32(blob, uint32(len(heat)))
+	for _, v := range heat {
+		if v > 255 {
+			v = 255
+		}
+		blob = append(blob, byte(v))
+	}
+	header := FrameHeader{
+		WorldSize: WorldSize, GridCols: GridCols, GridRows: GridRows,
+		Objective: Rect{X: 0, Y: 0, W: WorldSize, H: ObjectiveY},
+		Stats: Stats{Cops: activeCops, CopsGone: copsEliminated, Active: active,
+			Passed: passed, Arrested: arrested, Killed: killed, Paves: pavesThrown,
+			Panicked: panicked, Exhausted: exhausted, Leaders: leaders, Civils: civils,
+			Gases: len(gases), Goggles: goggles, Umbrellas: umbrellas, CopsDown: copsDown},
+	}
+	simMu.Unlock()
+
+	jsonBytes, _ := json.Marshal(header)
+	frame := make([]byte, 4+len(jsonBytes)+len(blob))
+	le.PutUint32(frame[0:4], uint32(len(jsonBytes)))
+	copy(frame[4:], jsonBytes)
+	copy(frame[4+len(jsonBytes):], blob)
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(frame)
+
+	*bp = blob
+	framePool.Put(bp)
+}
+
 func wsHandler(ws *websocket.Conn) {
 	defer ws.Close()
 
@@ -2014,8 +2125,10 @@ func main() {
 		return
 	}
 
+	initSimulation(defaultConfig()) // état initial (pour /api/frame sans client WS)
 	http.Handle("/", http.FileServer(http.Dir(".")))
 	http.Handle("/ws", websocket.Handler(wsHandler))
+	http.HandleFunc("/api/frame", httpFrameHandler) // chemin de sérialisation mesuré par Vegeta
 
 	port := 8080
 	fmt.Printf("Simulateur manif / encerclement CRS sur http://localhost:%d\n", port)

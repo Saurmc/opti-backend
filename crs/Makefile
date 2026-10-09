@@ -30,6 +30,9 @@ race:           ## détecteur de courses (nécessite CGO + gcc)
 hyperfine: build ## débit réel du binaire (40 ticks)
 	hyperfine --warmup 1 --runs 5 './crs.exe -bench -ticks=40'
 
+load: build     ## test de charge Vegeta sur /api/frame (lancer ./crs.exe d'abord)
+	echo "GET http://127.0.0.1:8080/api/frame" | vegeta attack -rate=2000 -duration=15s | vegeta report
+
 sqldemo: build  ## démo persistance SQL (batch insert + index B-Tree)
 	./crs.exe -sqldemo -db runs.db -runs 40 -ticks 1000 -protesters 150 -cops 20
 
