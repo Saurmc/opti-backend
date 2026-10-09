@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	_ "net/http/pprof" // expose /debug/pprof/* sur le serveur (profiling live, méthode du cours)
 	"os"
 	"runtime/pprof"
 	"sync"
@@ -335,6 +336,56 @@ var (
 	navDirY    []float64
 	navTick    int
 
+	// Grille spatiale (spatial hashing) pour les interactions de foule — buffers
+	// réutilisés entre ticks (zero-alloc). Listes chaînées : gridHeads[cell] = premier
+	// manifestant de la case, gridNext[i] = suivant.
+	gridCellSize float64
+	gridCols     int
+	gridRows     int
+	gridHeads    []int
+	gridNext     []int
+)
+
+// buildGrid range les manifestants actifs dans la grille (cases = rayon d'interaction).
+func buildGrid() {
+	gridCellSize = CohesionRadius
+	gridCols = int(WorldSize/gridCellSize) + 1
+	gridRows = gridCols
+	nCells := gridCols * gridRows
+	if len(gridHeads) != nCells {
+		gridHeads = make([]int, nCells)
+	}
+	for i := range gridHeads {
+		gridHeads[i] = -1
+	}
+	if len(gridNext) != len(protesters) {
+		gridNext = make([]int, len(protesters))
+	}
+	for i := range protesters {
+		p := &protesters[i]
+		if p.Arrested || p.Passed {
+			gridNext[i] = -1
+			continue
+		}
+		cx := int(p.X / gridCellSize)
+		cy := int(p.Y / gridCellSize)
+		if cx < 0 {
+			cx = 0
+		} else if cx >= gridCols {
+			cx = gridCols - 1
+		}
+		if cy < 0 {
+			cy = 0
+		} else if cy >= gridRows {
+			cy = gridRows - 1
+		}
+		c := cy*gridCols + cx
+		gridNext[i] = gridHeads[c]
+		gridHeads[c] = i
+	}
+}
+
+var (
 	// Contrôle de simulation.
 	simMu   sync.Mutex
 	cfg     SimConfig
@@ -812,9 +863,8 @@ func updateSimulation() {
 	}
 	navTick++
 
-	// Pré-passe : centre de gravité de la foule active + indices des meneurs.
+	// Pré-passe : centre de gravité de la foule active.
 	var sumX, sumY, activeCount float64
-	leaderIdx := make([]int, 0, int(LeaderRatio*float64(TotalProtesters))+1)
 	for i := range protesters {
 		p := &protesters[i]
 		if p.Arrested || p.Passed {
@@ -823,15 +873,15 @@ func updateSimulation() {
 		sumX += p.X
 		sumY += p.Y
 		activeCount++
-		if p.IsLeader {
-			leaderIdx = append(leaderIdx, i)
-		}
 	}
 	crowdX, crowdY := WorldSize/2, WorldSize/2
 	if activeCount > 0 {
 		crowdX = sumX / activeCount
 		crowdY = sumY / activeCount
 	}
+
+	// Range les manifestants dans la grille spatiale (interactions de foule en ~O(n)).
+	buildGrid()
 
 	// 1. Manifestants : perception CRS/gaz, interpellation, puis déplacement.
 	for i := range protesters {
@@ -868,10 +918,12 @@ func updateSimulation() {
 			}
 			dx := p.X - g.X
 			dy := p.Y - g.Y
-			d := math.Hypot(dx, dy)
-			if d < g.R+40.0 {
+			rr := g.R + 40.0
+			d2 := dx*dx + dy*dy
+			if d2 < rr*rr { // comparaison au carré : pas de sqrt si hors du nuage
 				inGasRaw = true
-				if d > 1e-6 {
+				if d2 > 1e-12 {
+					d := math.Sqrt(d2) // racine seulement pour normaliser la répulsion
 					gasFx += dx / d
 					gasFy += dy / d
 				}
@@ -889,11 +941,14 @@ func updateSimulation() {
 		counterWanted := inGasRaw && p.Goggles && p.CounterCd == 0 && simRng.Float64() < cfg.CounterChance
 
 		// Scan CRS : répulsion ressentie + données d'interpellation.
+		// Distances au carré partout (comparaisons), racine seulement pour la répulsion.
 		var copFx, copFy float64
-		nearestCopD := math.MaxFloat64
+		nearestCopD2 := math.MaxFloat64
 		var nearestCopX, nearestCopY float64
 		nearestCopIdx := -1
 		encircle := 0
+		encR2 := EncircleRadius * EncircleRadius
+		fearR2 := CopFearRadius * CopFearRadius
 		for ci := range cops {
 			c := &cops[ci]
 			if c.Eliminated {
@@ -901,16 +956,17 @@ func updateSimulation() {
 			}
 			dx := p.X - c.X
 			dy := p.Y - c.Y
-			d := math.Hypot(dx, dy)
-			if d < nearestCopD {
-				nearestCopD = d
+			d2 := dx*dx + dy*dy
+			if d2 < nearestCopD2 {
+				nearestCopD2 = d2
 				nearestCopX, nearestCopY = c.X, c.Y
 				nearestCopIdx = ci
 			}
-			if d < EncircleRadius {
+			if d2 < encR2 {
 				encircle++
 			}
-			if d < CopFearRadius && d > 1e-6 {
+			if d2 < fearR2 && d2 > 1e-12 {
+				d := math.Sqrt(d2)
 				w := (CopFearRadius - d) / CopFearRadius
 				copFx += dx / d * w
 				copFy += dy / d * w
@@ -918,7 +974,7 @@ func updateSimulation() {
 		}
 
 		// Condition d'interpellation : contact + (nasse OU gazé OU épuisé OU à bout de souffle).
-		if nearestCopD < ArrestRadius {
+		if nearestCopD2 < ArrestRadius*ArrestRadius {
 			if encircle >= EncircleCops || inGas || p.IsExhausted || p.Stamina < 25 {
 				if simRng.Float64() < arrestChance {
 					p.Arrested = true
@@ -929,7 +985,7 @@ func updateSimulation() {
 		}
 
 		// Contre-lacrymo : renvoie un nuage près du CRS le plus proche.
-		if counterWanted && nearestCopD < 1200.0 && len(gases) < MaxGases {
+		if counterWanted && nearestCopD2 < 1200.0*1200.0 && len(gases) < MaxGases {
 			dx := nearestCopX - p.X
 			dy := nearestCopY - p.Y
 			dl := math.Hypot(dx, dy)
@@ -947,14 +1003,14 @@ func updateSimulation() {
 		}
 
 		// Fil tendu : un meneur en pose un quand des CRS approchent.
-		if p.IsLeader && nearestCopD < TripwireRange && len(tripwires) < TripwireMaxActive &&
+		if p.IsLeader && nearestCopD2 < TripwireRange*TripwireRange && len(tripwires) < TripwireMaxActive &&
 			simRng.Float64() < cfg.TripwireRate/float64(TargetFPS) {
 			tripwires = append(tripwires, Tripwire{X: p.X, Y: p.Y, Uses: TripwireUses})
 		}
 
 		// Pavé : un lanceur vise le CRS le plus proche (recul + étourdissement).
 		if p.IsThrower && cfg.PaveRate > 0 && p.PaveCd == 0 && !p.IsExhausted &&
-			nearestCopIdx >= 0 && nearestCopD < PaveRange {
+			nearestCopIdx >= 0 && nearestCopD2 < PaveRange*PaveRange {
 			p.PaveCd = rateToCd(cfg.PaveRate)
 			pavesThrown++
 			c := &cops[nearestCopIdx]
@@ -1019,54 +1075,58 @@ func updateSimulation() {
 			}
 		}
 
-		// Cohésion : les civils calmes suivent le meneur le plus proche.
-		if !p.IsLeader && !p.IsPanicked {
-			bd := math.MaxFloat64
-			var lx, ly float64
-			found := false
-			for _, li := range leaderIdx {
-				l := &protesters[li]
-				dx := l.X - p.X
-				dy := l.Y - p.Y
-				d2 := dx*dx + dy*dy
-				if d2 < bd {
-					bd = d2
-					lx, ly = l.X, l.Y
-					found = true
-				}
-			}
-			if found && bd < 1800.0*1800.0 {
-				d := math.Sqrt(bd)
-				if d > 1e-6 {
-					fx += (lx - p.X) / d * 0.4
-					fy += (ly - p.Y) / d * 0.4
-				}
-			}
-		}
-
-		// Interactions de foule (séparation + cohésion) — NAÏF O(n²) : on parcourt
-		// TOUS les autres manifestants. Hot path vedette de l'audit.
+		// Interactions de foule via GRILLE SPATIALE : on ne scanne que les 9 cases
+		// voisines (~O(n) au lieu de O(n²)). On y fusionne : séparation, cohésion ET
+		// recherche du meneur le plus proche (plus de boucle séparée sur les meneurs).
 		var sepX, sepY, cohX, cohY float64
 		cohCount := 0
 		sepR2 := SeparationRadius * SeparationRadius
 		cohR2 := CohesionRadius * CohesionRadius
-		for j := range protesters {
-			o := &protesters[j]
-			if j == i || o.Arrested || o.Passed {
+		leaderBd := math.MaxFloat64
+		var leaderX, leaderY float64
+		hasLeader := false
+		pcx := int(p.X / gridCellSize)
+		pcy := int(p.Y / gridCellSize)
+		for gy := pcy - 1; gy <= pcy+1; gy++ {
+			if gy < 0 || gy >= gridRows {
 				continue
 			}
-			dx := p.X - o.X
-			dy := p.Y - o.Y
-			d2 := dx*dx + dy*dy
-			if d2 < sepR2 && d2 > 1e-6 {
-				d := math.Sqrt(d2)
-				sepX += dx / d // s'éloigner du voisin proche
-				sepY += dy / d
+			for gx := pcx - 1; gx <= pcx+1; gx++ {
+				if gx < 0 || gx >= gridCols {
+					continue
+				}
+				for j := gridHeads[gy*gridCols+gx]; j != -1; j = gridNext[j] {
+					if j == i {
+						continue
+					}
+					o := &protesters[j]
+					dx := p.X - o.X
+					dy := p.Y - o.Y
+					d2 := dx*dx + dy*dy
+					if d2 < sepR2 && d2 > 1e-6 {
+						d := math.Sqrt(d2)
+						sepX += dx / d
+						sepY += dy / d
+					}
+					if d2 < cohR2 {
+						cohX += o.X
+						cohY += o.Y
+						cohCount++
+					}
+					if o.IsLeader && d2 < leaderBd {
+						leaderBd = d2
+						leaderX, leaderY = o.X, o.Y
+						hasLeader = true
+					}
+				}
 			}
-			if d2 < cohR2 {
-				cohX += o.X // accumuler pour le centre local
-				cohY += o.Y
-				cohCount++
+		}
+		// Les civils calmes suivent le meneur proche repéré ci-dessus.
+		if hasLeader && !p.IsLeader && !p.IsPanicked {
+			d := math.Sqrt(leaderBd)
+			if d > 1e-6 {
+				fx += (leaderX - p.X) / d * 0.4
+				fy += (leaderY - p.Y) / d * 0.4
 			}
 		}
 		fx += sepX * SeparationWeight
