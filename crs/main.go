@@ -3,11 +3,14 @@ package main
 import (
 	"container/heap"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"math"
 	"math/rand"
 	"net/http"
+	"os"
+	"runtime/pprof"
 	"sync"
 	"time"
 
@@ -1725,7 +1728,58 @@ func wsHandler(ws *websocket.Conn) {
 	}
 }
 
+// runBench exécute N ticks de simulation le plus vite possible (sans ticker ni
+// réseau ni JSON) et affiche le débit réel. C'est la mesure de référence de l'audit.
+func runBench(c SimConfig, ticks int) {
+	initSimulation(c)
+	start := time.Now()
+	for i := 0; i < ticks; i++ {
+		updateSimulation()
+	}
+	elapsed := time.Since(start)
+	msPerTick := float64(elapsed.Microseconds()) / float64(ticks) / 1000.0
+	ups := float64(ticks) / elapsed.Seconds()
+	fmt.Printf("bench | %d ticks en %v | %.3f ms/tick | %.1f updates/s | seed=%d manifestants=%d CRS=%d\n",
+		ticks, elapsed, msPerTick, ups, c.Seed, c.Protesters, c.Cops)
+}
+
 func main() {
+	bench := flag.Bool("bench", false, "mode headless : exécute -ticks ticks sans ticker ni réseau, puis quitte")
+	ticks := flag.Int("ticks", 1000, "nombre de ticks à simuler en mode bench")
+	nProt := flag.Int("protesters", TotalProtesters, "nombre de manifestants")
+	nCops := flag.Int("cops", TotalCops, "nombre de CRS")
+	seed := flag.Int64("seed", MasterSeed, "graine déterministe")
+	cpuprofile := flag.String("cpuprofile", "", "écrit un profil CPU dans ce fichier")
+	memprofile := flag.String("memprofile", "", "écrit un profil mémoire dans ce fichier")
+	flag.Parse()
+
+	if *bench {
+		if *cpuprofile != "" {
+			f, err := os.Create(*cpuprofile)
+			if err != nil {
+				log.Fatal(err)
+			}
+			pprof.StartCPUProfile(f)
+			defer pprof.StopCPUProfile()
+		}
+
+		c := defaultConfig()
+		c.Seed = *seed
+		c.Protesters = *nProt
+		c.Cops = *nCops
+		runBench(c, *ticks)
+
+		if *memprofile != "" {
+			f, err := os.Create(*memprofile)
+			if err != nil {
+				log.Fatal(err)
+			}
+			pprof.WriteHeapProfile(f)
+			f.Close()
+		}
+		return
+	}
+
 	http.Handle("/", http.FileServer(http.Dir(".")))
 	http.Handle("/ws", websocket.Handler(wsHandler))
 
