@@ -11,6 +11,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // expose /debug/pprof/* sur le serveur (profiling live, méthode du cours)
 	"os"
+	"runtime"
 	"runtime/pprof"
 	"sync"
 	"time"
@@ -845,6 +846,128 @@ func initSimulation(c SimConfig) {
 	initNav()
 }
 
+// protScratch : résultats des scans coûteux (lecture seule) d'un manifestant,
+// calculés en parallèle puis consommés par la phase séquentielle.
+type protScratch struct {
+	skip                     bool
+	inGasRaw                 bool
+	gasFx, gasFy             float64
+	copFx, copFy             float64
+	nearestCopD2             float64
+	nearestCopX, nearestCopY float64
+	nearestCopIdx            int
+	encircle                 int
+	sepX, sepY               float64
+	cohX, cohY               float64
+	cohCount                 int
+	leaderX, leaderY         float64
+	leaderD2                 float64
+	hasLeader                bool
+}
+
+var scratch []protScratch
+
+// scanProtester calcule les forces de voisinage (gaz, CRS, foule) d'un manifestant
+// SANS rien muter d'autre que son propre scratch[i]. Parallélisable sans course :
+// les positions sont gelées pendant cette phase.
+func scanProtester(i int) {
+	p := &protesters[i]
+	s := &scratch[i]
+	*s = protScratch{nearestCopD2: math.MaxFloat64, nearestCopIdx: -1}
+	if p.Arrested || p.Passed || p.Y <= ObjectiveY {
+		s.skip = true
+		return
+	}
+
+	// Gaz (hors lacrymo renvoyée) : distances au carré, racine seulement dans le nuage.
+	for gi := range gases {
+		g := &gases[gi]
+		if g.Thrown {
+			continue
+		}
+		dx := p.X - g.X
+		dy := p.Y - g.Y
+		rr := g.R + 40.0
+		d2 := dx*dx + dy*dy
+		if d2 < rr*rr {
+			s.inGasRaw = true
+			if d2 > 1e-12 {
+				d := math.Sqrt(d2)
+				s.gasFx += dx / d
+				s.gasFy += dy / d
+			}
+		}
+	}
+
+	// CRS : répulsion + plus proche + encerclement (carré partout).
+	encR2 := EncircleRadius * EncircleRadius
+	fearR2 := CopFearRadius * CopFearRadius
+	for ci := range cops {
+		c := &cops[ci]
+		if c.Eliminated {
+			continue
+		}
+		dx := p.X - c.X
+		dy := p.Y - c.Y
+		d2 := dx*dx + dy*dy
+		if d2 < s.nearestCopD2 {
+			s.nearestCopD2 = d2
+			s.nearestCopX, s.nearestCopY = c.X, c.Y
+			s.nearestCopIdx = ci
+		}
+		if d2 < encR2 {
+			s.encircle++
+		}
+		if d2 < fearR2 && d2 > 1e-12 {
+			d := math.Sqrt(d2)
+			w := (CopFearRadius - d) / CopFearRadius
+			s.copFx += dx / d * w
+			s.copFy += dy / d * w
+		}
+	}
+
+	// Foule (grille spatiale) : séparation + cohésion + meneur le plus proche.
+	sepR2 := SeparationRadius * SeparationRadius
+	cohR2 := CohesionRadius * CohesionRadius
+	s.leaderD2 = math.MaxFloat64
+	pcx := int(p.X / gridCellSize)
+	pcy := int(p.Y / gridCellSize)
+	for gy := pcy - 1; gy <= pcy+1; gy++ {
+		if gy < 0 || gy >= gridRows {
+			continue
+		}
+		for gx := pcx - 1; gx <= pcx+1; gx++ {
+			if gx < 0 || gx >= gridCols {
+				continue
+			}
+			for j := gridHeads[gy*gridCols+gx]; j != -1; j = gridNext[j] {
+				if j == i {
+					continue
+				}
+				o := &protesters[j]
+				dx := p.X - o.X
+				dy := p.Y - o.Y
+				d2 := dx*dx + dy*dy
+				if d2 < sepR2 && d2 > 1e-12 {
+					d := math.Sqrt(d2)
+					s.sepX += dx / d
+					s.sepY += dy / d
+				}
+				if d2 < cohR2 {
+					s.cohX += o.X
+					s.cohY += o.Y
+					s.cohCount++
+				}
+				if o.IsLeader && d2 < s.leaderD2 {
+					s.leaderD2 = d2
+					s.leaderX, s.leaderY = o.X, o.Y
+					s.hasLeader = true
+				}
+			}
+		}
+	}
+}
+
 func updateSimulation() {
 	aggr := cfg.Aggr
 	if aggr <= 0 {
@@ -883,7 +1006,41 @@ func updateSimulation() {
 	// Range les manifestants dans la grille spatiale (interactions de foule en ~O(n)).
 	buildGrid()
 
-	// 1. Manifestants : perception CRS/gaz, interpellation, puis déplacement.
+	// 1a. Phase PARALLÈLE (lecture seule) : scans de voisinage (gaz/CRS/foule) répartis
+	// sur les cœurs via un worker pool borné. Positions gelées => aucune course.
+	if len(scratch) != len(protesters) {
+		scratch = make([]protScratch, len(protesters))
+	}
+	nWorkers := runtime.GOMAXPROCS(0)
+	if nWorkers < 1 {
+		nWorkers = 1
+	}
+	if nWorkers > len(protesters) {
+		nWorkers = len(protesters)
+	}
+	var wg sync.WaitGroup
+	chunk := (len(protesters) + nWorkers - 1) / nWorkers
+	for w := 0; w < nWorkers; w++ {
+		start := w * chunk
+		if start >= len(protesters) {
+			break
+		}
+		end := start + chunk
+		if end > len(protesters) {
+			end = len(protesters)
+		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				scanProtester(i)
+			}
+		}(start, end)
+	}
+	wg.Wait()
+
+	// 1b. Phase SÉQUENTIELLE : décisions (RNG) + déplacement, dans l'ordre => déterministe
+	// et tous les écrits partagés (compteurs, append, mutations CRS) restent mono-thread.
 	for i := range protesters {
 		p := &protesters[i]
 		if p.Arrested || p.Passed {
@@ -894,6 +1051,7 @@ func updateSimulation() {
 			passed++
 			continue
 		}
+		s := &scratch[i]
 
 		if p.PanicTimer > 0 {
 			p.PanicTimer--
@@ -908,29 +1066,8 @@ func updateSimulation() {
 			p.WetTimer--
 		}
 
-		// Nuages de gaz : répulsion + panique + ralentissement.
-		inGasRaw := false // dans un nuage, lunettes ou pas
-		var gasFx, gasFy float64
-		for gi := range gases {
-			g := &gases[gi]
-			if g.Thrown {
-				continue // la lacrymo renvoyée (bleue) n'affecte que les CRS
-			}
-			dx := p.X - g.X
-			dy := p.Y - g.Y
-			rr := g.R + 40.0
-			d2 := dx*dx + dy*dy
-			if d2 < rr*rr { // comparaison au carré : pas de sqrt si hors du nuage
-				inGasRaw = true
-				if d2 > 1e-12 {
-					d := math.Sqrt(d2) // racine seulement pour normaliser la répulsion
-					gasFx += dx / d
-					gasFy += dy / d
-				}
-			}
-		}
 		// Lunettes : immunité (ni panique ni ralentissement).
-		inGas := inGasRaw && !p.Goggles
+		inGas := s.inGasRaw && !p.Goggles
 		if inGas {
 			p.PanicTimer = PanicDuration
 		}
@@ -938,40 +1075,15 @@ func updateSimulation() {
 		p.IsPanicked = p.PanicTimer > 0
 
 		// Contre-lacrymo : un porteur de lunettes dans un nuage peut le renvoyer.
-		counterWanted := inGasRaw && p.Goggles && p.CounterCd == 0 && simRng.Float64() < cfg.CounterChance
+		counterWanted := s.inGasRaw && p.Goggles && p.CounterCd == 0 && simRng.Float64() < cfg.CounterChance
 
-		// Scan CRS : répulsion ressentie + données d'interpellation.
-		// Distances au carré partout (comparaisons), racine seulement pour la répulsion.
-		var copFx, copFy float64
-		nearestCopD2 := math.MaxFloat64
-		var nearestCopX, nearestCopY float64
-		nearestCopIdx := -1
-		encircle := 0
-		encR2 := EncircleRadius * EncircleRadius
-		fearR2 := CopFearRadius * CopFearRadius
-		for ci := range cops {
-			c := &cops[ci]
-			if c.Eliminated {
-				continue
-			}
-			dx := p.X - c.X
-			dy := p.Y - c.Y
-			d2 := dx*dx + dy*dy
-			if d2 < nearestCopD2 {
-				nearestCopD2 = d2
-				nearestCopX, nearestCopY = c.X, c.Y
-				nearestCopIdx = ci
-			}
-			if d2 < encR2 {
-				encircle++
-			}
-			if d2 < fearR2 && d2 > 1e-12 {
-				d := math.Sqrt(d2)
-				w := (CopFearRadius - d) / CopFearRadius
-				copFx += dx / d * w
-				copFy += dy / d * w
-			}
-		}
+		// Alias des scans précalculés (phase parallèle) : le code en aval est inchangé.
+		copFx, copFy := s.copFx, s.copFy
+		gasFx, gasFy := s.gasFx, s.gasFy
+		nearestCopD2 := s.nearestCopD2
+		nearestCopX, nearestCopY := s.nearestCopX, s.nearestCopY
+		nearestCopIdx := s.nearestCopIdx
+		encircle := s.encircle
 
 		// Condition d'interpellation : contact + (nasse OU gazé OU épuisé OU à bout de souffle).
 		if nearestCopD2 < ArrestRadius*ArrestRadius {
@@ -1075,52 +1187,13 @@ func updateSimulation() {
 			}
 		}
 
-		// Interactions de foule via GRILLE SPATIALE : on ne scanne que les 9 cases
-		// voisines (~O(n) au lieu de O(n²)). On y fusionne : séparation, cohésion ET
-		// recherche du meneur le plus proche (plus de boucle séparée sur les meneurs).
-		var sepX, sepY, cohX, cohY float64
-		cohCount := 0
-		sepR2 := SeparationRadius * SeparationRadius
-		cohR2 := CohesionRadius * CohesionRadius
-		leaderBd := math.MaxFloat64
-		var leaderX, leaderY float64
-		hasLeader := false
-		pcx := int(p.X / gridCellSize)
-		pcy := int(p.Y / gridCellSize)
-		for gy := pcy - 1; gy <= pcy+1; gy++ {
-			if gy < 0 || gy >= gridRows {
-				continue
-			}
-			for gx := pcx - 1; gx <= pcx+1; gx++ {
-				if gx < 0 || gx >= gridCols {
-					continue
-				}
-				for j := gridHeads[gy*gridCols+gx]; j != -1; j = gridNext[j] {
-					if j == i {
-						continue
-					}
-					o := &protesters[j]
-					dx := p.X - o.X
-					dy := p.Y - o.Y
-					d2 := dx*dx + dy*dy
-					if d2 < sepR2 && d2 > 1e-6 {
-						d := math.Sqrt(d2)
-						sepX += dx / d
-						sepY += dy / d
-					}
-					if d2 < cohR2 {
-						cohX += o.X
-						cohY += o.Y
-						cohCount++
-					}
-					if o.IsLeader && d2 < leaderBd {
-						leaderBd = d2
-						leaderX, leaderY = o.X, o.Y
-						hasLeader = true
-					}
-				}
-			}
-		}
+		// Interactions de foule (séparation/cohésion/meneur) : précalculées en phase
+		// parallèle (scanProtester), on lit juste le scratch.
+		sepX, sepY := s.sepX, s.sepY
+		cohX, cohY, cohCount := s.cohX, s.cohY, s.cohCount
+		leaderBd := s.leaderD2
+		leaderX, leaderY := s.leaderX, s.leaderY
+		hasLeader := s.hasLeader
 		// Les civils calmes suivent le meneur proche repéré ci-dessus.
 		if hasLeader && !p.IsLeader && !p.IsPanicked {
 			d := math.Sqrt(leaderBd)
