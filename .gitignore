@@ -14,3 +14,7 @@ Thumbs.db
 
 # Base SQLite de demo
 *.db
+
+# Resultats de mesure generes
+bench-results/
+crs/bench-results/

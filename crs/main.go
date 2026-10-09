@@ -884,6 +884,10 @@ type protScratch struct {
 
 var scratch []protScratch
 
+// parallelMode pilote la phase parallèle : "pool" (retenu), "per-item" (échec
+// constructif : goroutine par manifestant), "seq" (référence mono-cœur).
+var parallelMode = "pool"
+
 // scanProtester calcule les forces de voisinage (gaz, CRS, foule) d'un manifestant
 // SANS rien muter d'autre que son propre scratch[i]. Parallélisable sans course :
 // les positions sont gelées pendant cette phase.
@@ -985,6 +989,61 @@ func scanProtester(i int) {
 	}
 }
 
+// dispatchScan exécute la phase parallèle (scans de voisinage) selon parallelMode.
+// Commutable pour l'audit : "pool" (retenu), "per-item" (échec constructif), "seq".
+func dispatchScan() {
+	if len(scratch) != len(protesters) {
+		scratch = make([]protScratch, len(protesters))
+	}
+	switch parallelMode {
+	case "seq":
+		// Référence séquentielle (mono-cœur).
+		for i := range protesters {
+			scanProtester(i)
+		}
+	case "per-item":
+		// ÉCHEC CONSTRUCTIF : une goroutine par manifestant (~6000/tick).
+		var wg sync.WaitGroup
+		wg.Add(len(protesters))
+		for i := range protesters {
+			go func(i int) {
+				defer wg.Done()
+				scanProtester(i)
+			}(i)
+		}
+		wg.Wait()
+	default:
+		// "pool" : worker pool borné sur le nombre de cœurs (version retenue).
+		nWorkers := runtime.GOMAXPROCS(0)
+		if nWorkers < 1 {
+			nWorkers = 1
+		}
+		if nWorkers > len(protesters) {
+			nWorkers = len(protesters)
+		}
+		var wg sync.WaitGroup
+		chunk := (len(protesters) + nWorkers - 1) / nWorkers
+		for w := 0; w < nWorkers; w++ {
+			start := w * chunk
+			if start >= len(protesters) {
+				break
+			}
+			end := start + chunk
+			if end > len(protesters) {
+				end = len(protesters)
+			}
+			wg.Add(1)
+			go func(start, end int) {
+				defer wg.Done()
+				for i := start; i < end; i++ {
+					scanProtester(i)
+				}
+			}(start, end)
+		}
+		wg.Wait()
+	}
+}
+
 func updateSimulation() {
 	aggr := cfg.Aggr
 	if aggr <= 0 {
@@ -1023,38 +1082,9 @@ func updateSimulation() {
 	// Range les manifestants dans la grille spatiale (interactions de foule en ~O(n)).
 	buildGrid()
 
-	// 1a. Phase PARALLÈLE (lecture seule) : scans de voisinage (gaz/CRS/foule) répartis
-	// sur les cœurs via un worker pool borné. Positions gelées => aucune course.
-	if len(scratch) != len(protesters) {
-		scratch = make([]protScratch, len(protesters))
-	}
-	nWorkers := runtime.GOMAXPROCS(0)
-	if nWorkers < 1 {
-		nWorkers = 1
-	}
-	if nWorkers > len(protesters) {
-		nWorkers = len(protesters)
-	}
-	var wg sync.WaitGroup
-	chunk := (len(protesters) + nWorkers - 1) / nWorkers
-	for w := 0; w < nWorkers; w++ {
-		start := w * chunk
-		if start >= len(protesters) {
-			break
-		}
-		end := start + chunk
-		if end > len(protesters) {
-			end = len(protesters)
-		}
-		wg.Add(1)
-		go func(start, end int) {
-			defer wg.Done()
-			for i := start; i < end; i++ {
-				scanProtester(i)
-			}
-		}(start, end)
-	}
-	wg.Wait()
+	// 1a. Phase PARALLÈLE (lecture seule) : scans de voisinage (gaz/CRS/foule).
+	// Positions gelées => aucune course.
+	dispatchScan()
 
 	// 1b. Phase SÉQUENTIELLE : décisions (RNG) + déplacement, dans l'ordre => déterministe
 	// et tous les écrits partagés (compteurs, append, mutations CRS) restent mono-thread.
