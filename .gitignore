@@ -11,3 +11,6 @@
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Base SQLite de demo
+*.db

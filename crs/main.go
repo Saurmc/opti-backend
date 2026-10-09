@@ -1947,7 +1947,15 @@ func main() {
 	seed := flag.Int64("seed", MasterSeed, "graine déterministe")
 	cpuprofile := flag.String("cpuprofile", "", "écrit un profil CPU dans ce fichier")
 	memprofile := flag.String("memprofile", "", "écrit un profil mémoire dans ce fichier")
+	sqldemo := flag.Bool("sqldemo", false, "mode persistance : enregistre des runs en SQLite et démontre l'indexation")
+	dbPath := flag.String("db", "runs.db", "chemin du fichier SQLite (mode sqldemo)")
+	nRuns := flag.Int("runs", 50, "nombre de runs à enregistrer (mode sqldemo)")
 	flag.Parse()
+
+	if *sqldemo {
+		runSQLDemo(*dbPath, *nRuns, *ticks, *nProt, *nCops)
+		return
+	}
 
 	if *bench {
 		if *cpuprofile != "" {
