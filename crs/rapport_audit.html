@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Rapport d'audit de performance — Simulateur de Maintien de l'Ordre</title>
+<style>
+  :root{
+    --ink:#1a2230; --muted:#51607a; --line:#cbd5e1; --soft:#e7edf5;
+    --navy:#243245; --accent:#2563eb; --good:#15803d; --bad:#c62828; --amber:#c47f17;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-print-color-adjust:exact; print-color-adjust:exact}
+  body{font-family:"Segoe UI",Roboto,Helvetica,Arial,sans-serif; color:var(--ink);
+       background:#fff; margin:0; font-size:11.5px; line-height:1.55}
+  @page{size:A4; margin:15mm 14mm}
+  .wrap{max-width:820px; margin:0 auto}
+  h2,h3,h4{margin:0 0 .3em; line-height:1.22}
+  h2{font-size:15px; color:#fff; background:var(--navy); padding:7px 11px; border-radius:3px;
+     margin-top:22px}
+  h3{font-size:13px; color:var(--navy); border-bottom:2px solid var(--soft); padding-bottom:3px;
+     margin-top:17px}
+  h4{font-size:11.5px; color:var(--accent); margin-top:0}
+  p{margin:.45em 0}
+  small,.muted{color:var(--muted)}
+  code{font-family:"Cascadia Code",Consolas,monospace; background:#eef2f7; color:var(--ink);
+       padding:1px 4px; border-radius:3px; font-size:10px}
+  h2 code{background:#dbe4f3; color:var(--navy)}
+
+  /* ---- Page de couverture ---- */
+  .cover{height:262mm; display:flex; flex-direction:column; justify-content:space-between;
+         padding:4mm 2mm}
+  .cover .top{font-size:11px; color:var(--muted); letter-spacing:.4px; border-bottom:1px solid var(--line);
+              padding-bottom:10px}
+  .cover .top b{color:var(--navy)}
+  .cover .center{margin-top:-20mm}
+  .cover .eyebrow{font-size:12px; letter-spacing:3px; text-transform:uppercase; color:var(--accent);
+                  font-weight:700}
+  .cover .big{font-size:46px; font-weight:800; color:var(--navy); margin:6px 0 2px; letter-spacing:.5px}
+  .cover .tag-sub{font-size:15px; color:var(--muted)}
+  .cover .rule{height:3px; width:70px; background:var(--accent); margin:16px 0 18px}
+  .cover .meta{font-size:12px; line-height:2}
+  .cover .meta span{display:inline-block; width:95px; color:var(--muted)}
+  .cover .meta b{color:var(--ink); font-weight:600}
+  .cover .foot{font-size:10px; color:var(--muted); border-top:1px solid var(--line); padding-top:8px}
+
+  .part{background:var(--accent); color:#fff; padding:9px 12px; border-radius:3px; margin-top:4px;
+        display:flex; justify-content:space-between; align-items:baseline}
+  .part b{font-size:14px; letter-spacing:.4px}
+  .part span{font-size:10.5px; opacity:.92}
+  table{border-collapse:collapse; width:100%; margin:9px 0; font-size:10px}
+  th,td{border:1px solid var(--line); padding:5px 7px; text-align:left; vertical-align:top}
+  th{background:var(--soft); color:var(--navy); font-weight:700}
+  td.n,th.n{text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap}
+  tr:nth-child(even) td{background:#f7f9fc}
+  .tag{display:inline-block; font-size:8.5px; font-weight:700; padding:1px 5px; border-radius:3px; color:#fff}
+  .tag.macro{background:var(--accent)} .tag.micro{background:#7c3aed}
+  .tag.fail{background:var(--bad)} .tag.ok{background:var(--good)}
+  .good{color:var(--good); font-weight:700} .bad{color:var(--bad); font-weight:700}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  .card{border:1px solid var(--soft); border-radius:5px; padding:10px 12px; background:#fff}
+  figure{margin:9px 0; text-align:center}
+  figcaption{font-size:9px; color:var(--muted); margin-top:3px}
+  .barrow{display:grid; grid-template-columns:138px 1fr 66px; align-items:center; gap:8px; margin:3px 0}
+  .barrow .lbl{font-size:9.5px; color:var(--navy); text-align:right}
+  .bartrack{background:#eef2f7; border-radius:3px; height:15px}
+  .bar{height:15px; border-radius:3px}
+  .barrow .val{font-size:9.5px; font-weight:700; font-variant-numeric:tabular-nums}
+  ul{margin:.3em 0; padding-left:18px} li{margin:3px 0}
+  .pagebreak{page-break-before:always}
+  .foot{margin-top:8px; font-size:8.5px; color:var(--muted); border-top:1px solid var(--line);
+        padding-top:4px; display:flex; justify-content:space-between}
+  .note{background:#f7f9fc; border:1px solid var(--soft); border-left:3px solid var(--accent);
+        padding:8px 11px; border-radius:4px; margin:9px 0}
+  .concl p{margin:.5em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ======================= COUVERTURE ======================= -->
+  <div class="cover">
+    <div class="top"><b>Sup de Vinci</b> &nbsp;·&nbsp; RNCP Bloc 4 — Optimisations &amp; Performances Backend &nbsp;·&nbsp; Session E42</div>
+    <div class="center">
+      <div class="eyebrow">Rapport d'audit de performance</div>
+      <div class="big">Simulateur de Maintien de l'Ordre</div>
+      <div class="tag-sub">Optimisation d'un moteur de simulation temps réel écrit en Go</div>
+      <div class="rule"></div>
+      <div class="meta">
+        <div><span>Système</span> <b>Simulation de manifestation / encerclement CRS</b></div>
+        <div><span>Langage</span> <b>Go 1.26.4</b> (compilateur gc)</div>
+        <div><span>Auteur</span> <b>Marcus Declaude</b> — Master 2 Expert en Développement Logiciel (Dev B)</div>
+        <div><span>Date</span> <b>Octobre 2026</b></div>
+        <div><span>Dépôt</span> <a href="https://github.com/Saurmc/opti-backend" style="color:var(--accent); font-weight:600; text-decoration:none">github.com/Saurmc/opti-backend</a></div>
+      </div>
+    </div>
+    <div class="foot">Audit de performance backend — document de travail. Code source joint comme pièce justificative (reproductibilité des mesures).</div>
+  </div>
+
+  <!-- ======================= CONTEXTE ======================= -->
+  <div class="pagebreak"></div>
+
+  <h3>Contexte de l'audit</h3>
+  <p>Le système audité est un moteur de simulation temps réel : une foule d'environ 6 000 manifestants
+  se déplace dans une trame de rues pour atteindre un objectif, pendant que des CRS tentent de
+  l'encercler et d'interpeller. À chaque tick (cible 30 fois par seconde, soit un budget de
+  <b>33,3 ms</b>), le moteur recalcule les interactions entre agents, met à jour les positions, diffuse
+  l'état aux navigateurs connectés par WebSocket, puis enregistre les statistiques de la partie.</p>
+  <p>La première version fonctionne mais s'effondre sous les ~5 images par seconde : inutilisable en
+  conditions réelles. L'objectif de cet audit est de ramener le moteur dans son budget, de mesurer
+  chaque gain de façon reproductible, et de documenter les choix — y compris ceux qui n'ont pas
+  marché. Le rapport est organisé en deux volets : d'abord les mesures, ensuite l'analyse des choix
+  d'ingénierie et la tentative écartée.</p>
+
+  <!-- ======================= PARTIE I ======================= -->
+  <div class="part"><b>Partie I — Mesures</b><span>Banc d'essai, protocole et résultats comparatifs</span></div>
+
+  <h3>1.1 Banc d'essai &amp; conditions de mesure</h3>
+  <table>
+    <tr><th style="width:21%">Composant</th><th style="width:41%">Spécification</th><th>Pourquoi ça compte</th></tr>
+    <tr><td>Processeur</td><td>Intel Core i7-13620H — 10 cœurs physiques (6 P + 4 E), 16 threads</td><td>Plafond de parallélisme : le pool de workers est calé sur <code>GOMAXPROCS</code> = 16</td></tr>
+    <tr><td>Caches</td><td>L1 ~80 Ko/cœur · L2 totale 9,7 Mo · L3 24 Mo</td><td>Les tableaux contigus (<code>[]Protester</code>, <code>scratch[]</code>) tiennent dans le cache et exploitent les lignes de 64 octets</td></tr>
+    <tr><td>Mémoire</td><td>16 Go</td><td>Large pour l'état manipulé ; le moteur est limité par le CPU, pas par la RAM</td></tr>
+    <tr><td>OS &amp; runtime</td><td>Windows 11 (build 26200) · Go 1.26.4</td><td>Compilateur officiel, inlining et escape analysis actifs</td></tr>
+    <tr><td>Outillage</td><td>benchstat · Hyperfine · pprof · go test -race · Vegeta</td><td>Mesure statistique, débit binaire, profilage, détection de courses, charge HTTP</td></tr>
+  </table>
+  <div class="note"><b>Conditions de test.</b> Toutes les mesures ont été prises sur la même machine
+  <b>branchée sur secteur</b> (pas de bridage batterie), <b>aucun autre programme lancé</b> en parallèle,
+  et <b>après un redémarrage</b> pour repartir d'un cache froid et d'un système au repos. Chaque
+  benchmark CPU est précédé d'un préchauffage puis répété 10 fois ; les écarts ne sont retenus que si
+  <code>benchstat</code> les juge significatifs (p &lt; 0,05). Le moteur tourne en mode headless
+  (<code>-bench</code>, sans affichage ni réseau) pour mesurer son débit réel, non plafonné par la
+  boucle temps réel.</div>
+
+  <h3>1.2 Ce qu'il faut tenir à chaque tick</h3>
+  <table>
+    <tr><th>Grandeur</th><th class="n">Échelle</th><th>Coût dominant</th></tr>
+    <tr><td>Manifestants</td><td class="n">6 000</td><td>Interactions de foule : en naïf, chaque agent regarde tous les autres → <b>36 M calculs/tick</b></td></tr>
+    <tr><td>CRS</td><td class="n">160</td><td>Perception et interpellation : ≈ 1 M comparaisons/tick</td></tr>
+    <tr><td>Carte</td><td class="n">5000×5000</td><td>Navigation par flow-field (Dijkstra), recalculée périodiquement</td></tr>
+    <tr><td>Budget</td><td class="n">33,3 ms</td><td>Cible 30 TPS ; la version initiale est 6× au-dessus</td></tr>
+    <tr><td>Frame réseau</td><td class="n">~431 Ko</td><td>Diffusée à chaque tick : devient le goulot une fois le CPU réglé</td></tr>
+  </table>
+
+  <h3>1.3 Tableau comparatif : version initiale → version finale</h3>
+  <table>
+    <tr>
+      <th>Version</th><th style="width:33%">Ce qui change</th>
+      <th class="n">ms/tick</th><th class="n">Frame</th><th class="n">Débit</th><th>Nature</th>
+    </tr>
+    <tr><td><b>V0</b></td><td>Version initiale : boucles imbriquées naïves, sérialisation JSON</td><td class="n bad">204</td><td class="n">431 Ko</td><td class="n">5,6/s</td><td>baseline</td></tr>
+    <tr><td><b>V1</b></td><td>Grille spatiale : chaque agent ne regarde que ses 9 cases voisines</td><td class="n">59</td><td class="n">431 Ko</td><td class="n">—</td><td><span class="tag macro">macro</span> CPU</td></tr>
+    <tr><td><b>V2</b></td><td>Distances comparées au carré (on évite la racine)</td><td class="n">36</td><td class="n">431 Ko</td><td class="n">28/s</td><td><span class="tag micro">micro</span> CPU</td></tr>
+    <tr style="background:#fdf1f1"><td><b>écarté</b></td><td>Une goroutine par manifestant (voir Partie II)</td><td class="n bad">+17,6 %</td><td class="n">—</td><td class="n">—</td><td><span class="tag fail">rejeté</span></td></tr>
+    <tr><td><b>V3</b></td><td>Pool de workers borné sur les cœurs + scan parallèle / décisions séquentielles</td><td class="n good">8,8</td><td class="n">431 Ko</td><td class="n good">114/s</td><td><span class="tag macro">macro</span> concurrence</td></tr>
+    <tr><td><b>V4</b></td><td>Frame WebSocket en binaire (5 octets/agent) au lieu de JSON</td><td class="n">8,8</td><td class="n good">41,8 Ko</td><td class="n">114/s</td><td><span class="tag macro">macro</span> réseau</td></tr>
+    <tr><td><b>V5</b></td><td>Persistance SQLite : insertion en lot + index B-Tree</td><td class="n">8,8</td><td class="n">41,8 Ko</td><td class="n">114/s</td><td><span class="tag macro">macro</span> SQL</td></tr>
+  </table>
+  <p><small>Entre V0 et V2, le gain CPU vaut <b class="good">−82,5 %</b> (benchstat, p = 0,000, n = 10) ;
+  l'ajout du pool (V3) retire encore <b class="good">−71 %</b> (p = 0,000). Recoupé par Hyperfine sur le
+  binaire : 10,29 s → 1,48 s sur 40 ticks, soit <b>×6,9</b>.</small></p>
+
+  <h3>1.4 Les gains en un coup d'œil</h3>
+  <div class="grid2">
+    <figure class="card">
+      <h4>Temps par tick (ms — plus bas = mieux)</h4>
+      <div class="barrow"><div class="lbl">V0 initial</div><div class="bartrack"><div class="bar" style="width:100%;background:var(--bad)"></div></div><div class="val">204</div></div>
+      <div class="barrow"><div class="lbl">V1 grille</div><div class="bartrack"><div class="bar" style="width:29%;background:var(--amber)"></div></div><div class="val">59</div></div>
+      <div class="barrow"><div class="lbl">V2 distances²</div><div class="bartrack"><div class="bar" style="width:17.6%;background:var(--accent)"></div></div><div class="val">36</div></div>
+      <div class="barrow"><div class="lbl">V3 pool</div><div class="bartrack"><div class="bar" style="width:4.3%;background:var(--good)"></div></div><div class="val">8,8</div></div>
+      <figcaption>Fig. 1 — ×23 entre la version initiale et la version finale.</figcaption>
+    </figure>
+    <figure class="card">
+      <h4>Frame réseau (Ko — plus bas = mieux)</h4>
+      <div class="barrow"><div class="lbl">JSON (V0)</div><div class="bartrack"><div class="bar" style="width:100%;background:var(--bad)"></div></div><div class="val">431</div></div>
+      <div class="barrow"><div class="lbl">Binaire (V4)</div><div class="bartrack"><div class="bar" style="width:9.7%;background:var(--good)"></div></div><div class="val">41,8</div></div>
+      <figcaption>Fig. 2 — −90 % de bande passante par image.</figcaption>
+    </figure>
+    <figure class="card">
+      <h4>Requête SQL de plage (µs — plus bas = mieux)</h4>
+      <div class="barrow"><div class="lbl">sans index</div><div class="bartrack"><div class="bar" style="width:100%;background:var(--bad)"></div></div><div class="val">3 730</div></div>
+      <div class="barrow"><div class="lbl">index B-Tree</div><div class="bartrack"><div class="bar" style="width:13.5%;background:var(--good)"></div></div><div class="val">504</div></div>
+      <figcaption>Fig. 3 — ×7,4 (plan passé de <code>SCAN</code> à <code>SEARCH USING INDEX</code>).</figcaption>
+    </figure>
+    <figure class="card">
+      <h4>Débit moteur (ticks/s — plus haut = mieux)</h4>
+      <div class="barrow"><div class="lbl">V0 initial</div><div class="bartrack"><div class="bar" style="width:4.9%;background:var(--bad)"></div></div><div class="val">5,6</div></div>
+      <div class="barrow"><div class="lbl">V2</div><div class="bartrack"><div class="bar" style="width:24.6%;background:var(--amber)"></div></div><div class="val">28</div></div>
+      <div class="barrow"><div class="lbl">V3 pool</div><div class="bartrack"><div class="bar" style="width:100%;background:var(--good)"></div></div><div class="val">114</div></div>
+      <figcaption>Fig. 4 — débit mesuré en headless (×20).</figcaption>
+    </figure>
+  </div>
+
+  <h3>1.5 Comportement sous charge (Vegeta)</h3>
+  <p>Le chemin de sérialisation a été exposé en HTTP (<code>/api/frame</code>) et bombardé à 2 000
+  requêtes/s pendant 15 s, pour vérifier la tenue en charge et regarder les percentiles plutôt que la
+  moyenne.</p>
+  <table>
+    <tr><th>Charge</th><th class="n">Dispo.</th><th class="n">Débit</th><th class="n">P50</th><th class="n">P90</th><th class="n">P99</th><th class="n">Octets/rép.</th></tr>
+    <tr><td>Vegeta — 2 000 req/s · 15 s</td><td class="n good">100 %</td><td class="n">2 000,6/s</td><td class="n">563 µs</td><td class="n">1,68 ms</td><td class="n bad">24,5 ms</td><td class="n">41 308</td></tr>
+  </table>
+  <p><small>La moyenne est bonne (P50 à 563 µs) mais le P99 grimpe à 24,5 ms : la queue vient du verrou
+  global pris pendant la sérialisation (chaque requête sérialise 40 Ko sous le même mutex, qui sature
+  vers 2 000 req/s). C'est une limite connue, à lever plus tard avec un snapshot sans verrou. Tout est
+  rejouable en une commande : <code>make benchmarks</code> relance l'ensemble (env, benchstat, pprof,
+  Hyperfine, Vegeta, SQL) et horodate les résultats.</small></p>
+
+  <div class="foot"><span>Simulateur de maintien de l'ordre — audit de performance</span><span>Partie I</span></div>
+
+  <!-- ======================= PARTIE II ======================= -->
+  <div class="pagebreak"></div>
+  <div class="part"><b>Partie II — Analyse</b><span>Hot path, choix d'ingénierie et tentative écartée</span></div>
+
+  <h3>2.1 Où partait le temps</h3>
+  <p>Le profilage de la version initiale ne laisse pas de place au doute : presque tout le temps CPU
+  est concentré dans la boucle de mise à jour, et plus précisément dans les calculs de distance entre
+  agents. Ce n'est pas un problème de mémoire (34 Ko et ~1 000 allocations par tick, c'est négligeable
+  pour le ramasse-miettes) : le moteur est limité par le calcul, pas par la RAM.</p>
+  <div class="grid2">
+    <figure class="card">
+      <h4>Profil CPU — version initiale</h4>
+      <div class="barrow"><div class="lbl">boucle de mise à jour</div><div class="bartrack"><div class="bar" style="width:93.5%;background:var(--bad)"></div></div><div class="val">93,5 %</div></div>
+      <div class="barrow"><div class="lbl">racine carrée (Hypot)</div><div class="bartrack"><div class="bar" style="width:4.8%;background:var(--amber)"></div></div><div class="val">4,8 %</div></div>
+      <figcaption>Fig. 5 — 99,5 % du temps dans une seule fonction : le voisinage en O(n²).</figcaption>
+    </figure>
+    <figure class="card">
+      <h4>Profil CPU — version finale</h4>
+      <div class="barrow"><div class="lbl">scan de voisinage</div><div class="bartrack"><div class="bar" style="width:78%;background:var(--accent)"></div></div><div class="val">78,0 %</div></div>
+      <div class="barrow"><div class="lbl">reste de la boucle</div><div class="bartrack"><div class="bar" style="width:17%;background:#60a5fa"></div></div><div class="val">17,0 %</div></div>
+      <figcaption>Fig. 6 — le coût résiduel est le scan parallélisé, réparti sur les cœurs.</figcaption>
+    </figure>
+  </div>
+  <p><small>La loi d'échelle confirme le diagnostic : passer de 4 000 à 6 000 agents (×1,5) multiplie
+  le temps par 2,33, soit à peu près 1,5² — la signature d'un coût en O(n²).</small></p>
+
+  <h3>2.2 Les leviers actionnés</h3>
+  <div class="grid2">
+    <div class="card"><h4>Calcul <span class="tag macro">macro</span> <span class="tag micro">micro</span></h4>
+      <p>On a remplacé le « chacun regarde tous les autres » par une <b>grille spatiale</b> : les agents
+      sont rangés par cases, chacun ne compare qu'aux 9 cases autour de lui. Comme les interactions sont
+      locales, le résultat est le même pour un coût qui passe de O(n²) à ~O(n). En complément, on compare
+      les distances <b>au carré</b> et on ne calcule la racine que lorsqu'on en a vraiment besoin.
+      <br><b>Gain : −82,5 %.</b></p></div>
+    <div class="card"><h4>Concurrence <span class="tag macro">macro</span></h4>
+      <p>La boucle a été <b>répartie sur les cœurs</b> avec un pool borné, en séparant le travail en deux
+      temps : d'abord les scans de voisinage en parallèle (lecture seule, positions figées, donc sans
+      conflit), puis les décisions et déplacements en séquentiel (ce qui garde le déterminisme). Vérifié
+      avec le détecteur de courses de Go (aucune détectée).
+      <br><b>Gain : −71 % (≈ ×3,5, limité par la partie séquentielle).</b></p></div>
+    <div class="card"><h4>Réseau <span class="tag macro">macro</span></h4>
+      <p>La frame JSON (verbeuse, re-parsée côté client) a été remplacée par un <b>format binaire</b> :
+      un agent tient en 5 octets, écrits directement dans un buffer réutilisé. Le petit reste (stats,
+      décor) part en JSON dans un en-tête. Côté navigateur, lecture directe sans parsing de texte.
+      <br><b>Gain : −90 % de bande passante.</b></p></div>
+    <div class="card"><h4>Persistance <span class="tag macro">macro</span></h4>
+      <p>Les stats par tick sont écrites <b>en lot</b> (une transaction par partie, au lieu d'une
+      écriture par ligne : ×1425). Pour la relecture, un <b>index B-Tree</b> sur
+      <code>(run_id, tick_index)</code> fait passer une requête de plage d'un balayage complet à une
+      recherche indexée, confirmé par <code>EXPLAIN QUERY PLAN</code>.
+      <br><b>Gain : ×7,4.</b></p></div>
+  </div>
+
+  <h3>2.3 Une optimisation qui a échoué</h3>
+  <p>L'idée semblait logique : si paralléliser sur dix cœurs accélère, alors pousser le curseur au bout —
+  <b>une goroutine par manifestant</b>, soit ~6 000 par tick — devrait aller encore plus vite, en
+  laissant le runtime Go répartir tout ça.</p>
+  <p>En pratique c'est l'inverse : <b>+17,6 % de temps</b>. Créer 6 000 goroutines à chaque tick coûte
+  plus cher que le travail lui-même (allocation de piles, ordonnancement), sans gagner le moindre
+  parallélisme en plus — il n'y a que 10 cœurs. Et les 6 000 goroutines entremêlées cassent la lecture
+  séquentielle des tableaux que le pool, lui, parcourt proprement.</p>
+  <table>
+    <tr><th>Tentative</th><th>Idée</th><th class="n">Résultat</th><th>Décision</th></tr>
+    <tr style="background:#fdf1f1"><td>Une goroutine par manifestant</td><td>Parallélisme « maximal »</td><td class="n bad">+17,6 % <small>(p=0,000)</small></td><td><span class="tag fail">écarté</span></td></tr>
+    <tr><td>Pool borné sur les cœurs</td><td>Une goroutine par cœur</td><td class="n good">référence</td><td><span class="tag ok">retenu</span></td></tr>
+  </table>
+  <p><small>Mesuré à charge égale (benchstat, n = 10). On est revenu au pool ; le mode fautif n'est gardé
+  que comme variante de benchmark pour appuyer ce constat.</small></p>
+
+  <!-- ======================= CONCLUSION ======================= -->
+  <h2>Conclusion</h2>
+  <div class="concl">
+    <p>Au départ, le moteur tournait à ~204 ms par tick, soit six fois la cible de 33,3 ms. À l'arrivée,
+    il tient à <b>~8,8 ms</b> : <b>×23</b> plus rapide, un débit passé de 5,6 à 114 ticks/s, et une frame
+    réseau divisée par dix. Le temps réel est désormais tenu avec de la marge.</p>
+    <p><b>L'accent a été mis sur le CPU</b>, parce que c'est là qu'était le problème : presque tout le
+    temps se jouait dans une poignée de lignes de calcul. La mémoire, elle, n'a jamais été limitante
+    (quelques dizaines de Ko par tick) ; on l'a seulement effleurée avec des buffers réutilisés. Le
+    travail terminé côté processeur, la pression est retombée sur le réseau, d'où le passage en binaire ;
+    la base SQL a complété l'audit sur le volet persistance.</p>
+    <p><b>Le meilleur retour sur investissement vient de la grille spatiale.</b> Ce simple changement
+    d'algorithme (macro) efface à lui seul l'essentiel du coût, loin devant n'importe quel réglage fin.
+    La règle est connue : on traite d'abord la complexité, on parallélise seulement après — jamais
+    l'inverse.</p>
+    <p>La <b>tentative écartée</b> dit la même chose en négatif : à trop vouloir paralléliser, on a perdu
+    17,6 %. Le bon dosage n'est pas le plus agressif, mais celui qui épouse le nombre de cœurs réels de
+    la machine.</p>
+  </div>
+
+  <!-- ======================= ANNEXE ======================= -->
+  <h2>Annexe — Gouvernance IA (<code>constitution.md</code>)</h2>
+  <p>Un fichier <code>constitution.md</code> à la racine encadre les assistants de code IA, en quatre
+  règles :</p>
+  <table>
+    <tr><th style="width:24%">Règle</th><th>En clair</th></tr>
+    <tr><td>Posture</td><td>L'IA raisonne en ingénieur perf (budget tick, cache, allocations, cœurs) ; elle mesure au lieu de deviner.</td></tr>
+    <tr><td>Interdits</td><td>Sur le hot path : pas de <code>fmt.Sprintf</code>, pas de goroutines non bornées, pas de conversions <code>string↔[]byte</code> inutiles, pas d'alloc tas injustifiée, pas de racine quand le carré suffit.</td></tr>
+    <tr><td>Preuve</td><td>Chaque optimisation vient avec son hypothèse matérielle <i>et</i> la commande qui la vérifie. Sans preuve, c'est refusé.</td></tr>
+    <tr><td>Forme</td><td>Consignes courtes et vérifiables ; un commit par optimisation avec l'avant/après chiffré.</td></tr>
+  </table>
+
+  <div class="foot"><span>Simulateur de maintien de l'ordre — audit de performance</span><span>Partie II · conclusion · annexe</span></div>
+
+</div>
+</body>
+</html>
